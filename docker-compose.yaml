@@ -292,6 +292,7 @@ services:
       - "8000:8000"
     environment:
       DATA_DIR: /app/data
+      REDPANDA_BROKERS: redpanda:9092
     volumes:
       - ${AIRFLOW_PROJ_DIR:-.}/data/webhooks:/app/data
     healthcheck:
@@ -301,6 +302,73 @@ services:
       retries: 5
       start_period: 30s
     restart: always
+    depends_on:
+      redpanda:
+        condition: service_healthy
+
+  # Redpanda broker
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.3.1
+    command:
+      - redpanda
+      - start
+      - --mode
+      - dev-container
+      - --kafka-addr
+      - internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr
+      - internal://redpanda:9092,external://localhost:19092
+      - --schema-registry-addr
+      - internal://0.0.0.0:8081,external://0.0.0.0:18081
+      - --rpc-addr
+      - redpanda:33145
+      - --advertise-rpc-addr
+      - redpanda:33145
+      - --smp
+      - '1'
+      - --memory
+      - '1G'
+      - --default-log-level=info
+    ports:
+      - "19092:19092"
+      - "18081:18081"
+      - "9092:9092"
+      - "8081:8081"
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.*true' || exit 1"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 30s
+    restart: always
+
+  # Redpanda Console for monitoring
+  redpanda-console:
+    image: docker.redpanda.com/redpandadata/console:v2.8.0
+    entrypoint: /bin/sh
+    command: -c 'echo "$$CONSOLE_CONFIG_FILE" > /tmp/config.yml; /app/console --config.filepath=/tmp/config.yml'
+    environment:
+      CONSOLE_CONFIG_FILE: |
+        kafka:
+          brokers: ["redpanda:9092"]
+          schemaRegistry:
+            enabled: true
+            urls: ["http://redpanda:8081"]
+        redpanda:
+          adminApi:
+            enabled: true
+            urls: ["http://redpanda:9644"]
+        connect:
+          enabled: false
+    ports:
+      - "8090:8080"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    restart: always
 
 volumes:
   postgres-db-volume:
+  redpanda-data:
