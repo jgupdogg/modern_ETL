@@ -369,6 +369,28 @@ services:
         condition: service_healthy
     restart: always
 
+  # MinIO Object Storage
+  minio:
+    image: minio/minio:RELEASE.2024-01-05T22-17-24Z
+    container_name: claude_pipeline-minio
+    ports:
+      - "9000:9000"     # MinIO API
+      - "9001:9001"     # MinIO Console
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio-data:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+      start_period: 30s
+    restart: always
+
 volumes:
   postgres-db-volume:
   redpanda-data:
+  minio-data:

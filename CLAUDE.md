@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is an Apache Airflow project for orchestrating data pipelines, using Docker Compose for containerization. The project uses Celery Executor for distributed task execution and includes PostgreSQL for metadata storage, Redis as the Celery message broker, and Redpanda for event streaming.
+This is an Apache Airflow project for orchestrating data pipelines, using Docker Compose for containerization. The project uses Celery Executor for distributed task execution and includes PostgreSQL for metadata storage, Redis as the Celery message broker, Redpanda for event streaming, and MinIO for object storage.
 
 ## Key Commands
 
@@ -49,7 +49,9 @@ docker-compose run airflow-cli airflow dags unpause [dag_id]
 - **Airflow API Server**: http://localhost:8080
 - **Flower UI** (when enabled): http://localhost:5555
 - **Redpanda Console**: http://localhost:8090
-- **Default credentials**: username=`airflow`, password=`airflow`
+- **MinIO API**: http://localhost:9000
+- **MinIO Console**: http://localhost:9001
+- **Default credentials**: username=`airflow`, password=`airflow` (Airflow), username=`minioadmin`, password=`minioadmin123` (MinIO)
 
 ## Architecture
 
@@ -59,12 +61,13 @@ The project uses the official Apache Airflow Docker setup with the following ser
 2. **Redis**: Celery message broker
 3. **Redpanda**: Event streaming platform (Kafka-compatible)
 4. **Redpanda Console**: Web UI for Redpanda monitoring
-5. **Airflow API Server**: REST API and web UI
-6. **Airflow Scheduler**: Schedules DAG runs
-7. **Airflow DAG Processor**: Parses DAG files
-8. **Airflow Worker**: Executes tasks via Celery
-9. **Airflow Triggerer**: Manages deferrable operators
-10. **Flower** (optional): Celery monitoring UI
+5. **MinIO**: S3-compatible object storage
+6. **Airflow API Server**: REST API and web UI
+7. **Airflow Scheduler**: Schedules DAG runs
+8. **Airflow DAG Processor**: Parses DAG files
+9. **Airflow Worker**: Executes tasks via Celery
+10. **Airflow Triggerer**: Manages deferrable operators
+11. **Flower** (optional): Celery monitoring UI
 
 ## Development Workflow
 
@@ -122,6 +125,46 @@ curl -X POST http://localhost:8000/webhooks \
 python scripts/redpanda_consumer.py
 ```
 
+### MinIO Commands
+
+```bash
+# Access MinIO client inside container
+docker exec claude_pipeline-minio mc --help
+
+# List buckets
+docker exec claude_pipeline-minio mc ls local/
+
+# Create a bucket
+docker exec claude_pipeline-minio mc mb local/[bucket-name]
+
+# Upload file to bucket
+docker exec claude_pipeline-minio mc cp [local-file] local/[bucket-name]/
+
+# Download file from bucket
+docker exec claude_pipeline-minio mc cp local/[bucket-name]/[file] [local-destination]
+
+# Remove object
+docker exec claude_pipeline-minio mc rm local/[bucket-name]/[file]
+
+# Get bucket stats
+docker exec claude_pipeline-minio mc du local/[bucket-name]
+```
+
+### Testing MinIO Integration
+
+```bash
+# Run MinIO test script
+cd scripts
+source venv/bin/activate
+python minio_test.py
+
+# The test script will:
+# - Test connection to MinIO
+# - Create/verify test bucket
+# - Upload/download/delete test objects
+# - Verify all operations completed successfully
+```
+
 ## Important Notes
 
 - The project currently has example DAGs disabled (`AIRFLOW__CORE__LOAD_EXAMPLES: 'false'`)
@@ -130,3 +173,4 @@ python scripts/redpanda_consumer.py
 - The Airflow image version is controlled via `AIRFLOW_IMAGE_NAME` in `.env`
 - NGROK_TOKEN is stored in `.env` for webhook tunneling
 - Redpanda configuration (brokers, topics) is stored in `.env`
+- MinIO configuration (credentials) is stored in `.env`
