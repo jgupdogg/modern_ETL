@@ -8,6 +8,7 @@ A modern data pipeline architecture using Apache Airflow, FastAPI, Redpanda, Min
 - **FastAPI webhook listener** for real-time data ingestion
 - **Redpanda** for event streaming and real-time data processing
 - **MinIO** for S3-compatible object storage
+- **PySpark Streaming** for real-time data processing and analytics
 - **Automatic ngrok tunneling** for webhook development
 - **Helius integration** for Solana blockchain data
 - **Docker Compose** based deployment
@@ -124,13 +125,59 @@ docker exec claude_pipeline-minio mc ls local/
 docker exec claude_pipeline-minio mc mb local/my-bucket
 ```
 
+## ⚡ PySpark Streaming
+
+Real-time data processing pipeline using PySpark for streaming analytics:
+
+### Data Flow
+```
+Webhooks → Redpanda → PySpark Streaming → Local Files → PySpark Batch → MinIO
+```
+
+### Features
+- **Structured Streaming**: Real-time consumption from Redpanda (Kafka-compatible)
+- **Data Transformation**: Schema parsing, metadata addition, timestamp processing
+- **Fault Tolerance**: Checkpointing for automatic recovery
+- **Partitioned Storage**: Date/hour-based partitioning in Parquet format
+- **S3A Integration**: Direct MinIO storage using S3-compatible API
+
+### Testing PySpark Integration
+
+```bash
+# Setup environment
+cd scripts
+source venv/bin/activate
+pip install -r requirements.txt
+
+# Test streaming pipeline: Redpanda → PySpark → Local
+python pyspark_redpanda_test.py
+
+# Test batch pipeline: Local → PySpark → MinIO
+python pyspark_minio_test.py
+
+# Send test data
+curl -X POST http://localhost:8000/webhooks \
+  -H "Content-Type: application/json" \
+  -d '{"test": "pyspark", "value": 123}'
+
+# View results in MinIO Console
+# http://localhost:9001 (minioadmin/minioadmin123)
+```
+
+### Production Considerations
+- Resource allocation (memory/cores) based on data volume
+- Multiple streaming applications for different data types
+- Airflow DAGs for monitoring and orchestration
+- Dead letter queues for error handling
+
 ## 🚧 Roadmap
 
 - [x] RedPanda integration for event streaming
 - [x] MinIO for object storage
-- [ ] PySpark for data processing
+- [x] PySpark for data processing
 - [ ] DBT for data transformation
 - [ ] PostgreSQL enhancements
+- [ ] Production PySpark service deployment
 
 ## 📝 License
 

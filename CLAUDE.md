@@ -165,6 +165,82 @@ python minio_test.py
 # - Verify all operations completed successfully
 ```
 
+### Viewing MinIO Data
+
+```bash
+# MinIO Web Console (easiest)
+# http://localhost:9001
+# Login: minioadmin / minioadmin123
+
+# List objects via CLI
+docker exec claude_pipeline-minio mc ls local/[bucket-name]/ --recursive
+
+# Copy file from MinIO to local
+docker exec claude_pipeline-minio mc cp local/[bucket]/[file] /tmp/[filename]
+
+# Download via Python
+cd scripts && source venv/bin/activate
+python -c "
+import boto3
+from botocore.client import Config
+s3 = boto3.client('s3', endpoint_url='http://localhost:9000', 
+                  aws_access_key_id='minioadmin', 
+                  aws_secret_access_key='minioadmin123')
+s3.download_file('bucket-name', 'object-key', 'local-file')
+"
+```
+
+## PySpark Streaming Integration
+
+The project includes PySpark streaming capabilities for real-time data processing between Redpanda and MinIO.
+
+### PySpark Test Scripts
+
+```bash
+# Setup environment
+cd scripts
+source venv/bin/activate
+pip install -r requirements.txt
+
+# Test 1: Redpanda → PySpark → Local Directory
+python pyspark_redpanda_test.py
+
+# Test 2: Local Directory → PySpark → MinIO  
+python pyspark_minio_test.py
+```
+
+### PySpark Data Flow
+
+```
+Webhooks → Redpanda → PySpark Streaming → Local Files → PySpark Batch → MinIO
+```
+
+**Features:**
+- **Structured Streaming**: Real-time consumption from Redpanda (Kafka-compatible)
+- **Data Transformation**: Schema parsing, metadata addition, timestamp processing
+- **Partitioning**: Date/hour-based partitioning for efficient querying
+- **Storage Formats**: Parquet files for optimal analytics performance
+- **S3A Integration**: Direct MinIO integration using S3-compatible API
+- **Checkpointing**: Fault-tolerant processing with automatic recovery
+
+### PySpark Configuration
+
+The test scripts demonstrate:
+- Kafka consumer configuration for Redpanda
+- S3A filesystem setup for MinIO connectivity
+- Structured streaming with checkpointing
+- Batch processing with partitioning
+- Error handling and data validation
+
+### Scaling to Production
+
+For production deployment, consider:
+- Docker service for PySpark streaming applications
+- Airflow DAGs for monitoring and orchestration
+- Resource allocation (memory/cores) based on data volume
+- Multiple streaming applications for different data types
+- Dead letter queues for error handling
+
 ## Important Notes
 
 - The project currently has example DAGs disabled (`AIRFLOW__CORE__LOAD_EXAMPLES: 'false'`)
