@@ -1,0 +1,35 @@
+name: 'claude_pipeline'
+version: '1.0.0'
+config-version: 2
+
+# This setting configures which "profile" dbt uses for this project.
+profile: 'claude_pipeline'
+
+# These configurations specify where dbt should look for different types of files.
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+clean-targets:         # directories to be removed by `dbt clean`
+  - "target"
+  - "dbt_packages"
+
+# Configuring models
+models:
+  claude_pipeline:
+    # Config applied to all models under models/bronze/
+    bronze:
+      +materialized: view
+    # Config applied to all models under models/silver/
+    silver:
+      +materialized: table
+      +partition_by: processing_date
+
+vars:
+  # Define variables that can be used in models
+  webhook_bucket: 'webhook-data'
+  bronze_path: 'processed-webhooks'
+  silver_path: 'silver-webhooks'

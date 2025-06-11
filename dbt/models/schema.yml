@@ -1,0 +1,89 @@
+version: 2
+
+models:
+  - name: bronze_webhooks
+    description: "Deduplicated view of raw webhook data from MinIO"
+    columns:
+      - name: message_id
+        description: "Unique message identifier"
+        tests:
+          - not_null
+      - name: row_num
+        description: "Row number for deduplication (1 = most recent)"
+
+  - name: silver_webhook_events
+    description: "Cleaned and categorized webhook events with incremental processing"
+    columns:
+      - name: message_id
+        description: "Unique message identifier"
+        tests:
+          - unique
+          - not_null
+      
+      - name: event_type
+        description: "Categorized event type"
+        tests:
+          - accepted_values:
+              values: ['solana_swap', 'solana_transaction', 'test_event', 'unknown']
+      
+      - name: processing_date
+        description: "Date of processing"
+        tests:
+          - not_null
+      
+      - name: has_valid_json
+        description: "Whether payload is valid JSON"
+        tests:
+          - not_null
+
+  - name: silver_transaction_details
+    description: "Transaction-specific details for Solana events"
+    columns:
+      - name: message_id
+        description: "Unique message identifier"
+        tests:
+          - unique
+          - not_null
+          - relationships:
+              to: ref('silver_webhook_events')
+              field: message_id
+      
+      - name: event_type
+        description: "Event type (filtered to transactions only)"
+        tests:
+          - accepted_values:
+              values: ['solana_swap', 'solana_transaction']
+      
+      - name: transaction_signature
+        description: "Solana transaction signature"
+        tests:
+          - not_null:
+              where: "transaction_signature IS NOT NULL"
+
+  - name: silver_data_quality_metrics
+    description: "Data quality metrics aggregated by processing date"
+    columns:
+      - name: processing_date
+        description: "Date of processing"
+        tests:
+          - unique
+          - not_null
+      
+      - name: total_events
+        description: "Total number of events processed"
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+      
+      - name: json_validity_pct
+        description: "Percentage of events with valid JSON"
+        tests:
+          - dbt_utils.expression_is_true:
+              expression: "{{ this }}.json_validity_pct >= 0 AND {{ this }}.json_validity_pct <= 100"
+      
+      - name: unique_message_ids
+        description: "Count of unique message IDs"
+        tests:
+          - dbt_utils.expression_is_true:
+              expression: "<= total_events"

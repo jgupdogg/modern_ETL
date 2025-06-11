@@ -4,7 +4,9 @@ x-airflow-common:
   # Comment the image line, place your Dockerfile in the directory where you placed the docker-compose.yaml
   # and uncomment the "build" line below, Then run `docker-compose build` to build the images.
   # image: ${AIRFLOW_IMAGE_NAME:-apache/airflow:|version|}
-  build: .
+  build: 
+    context: .
+    dockerfile: Dockerfile.airflow
   environment:
     &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: CeleryExecutor
@@ -31,6 +33,8 @@ x-airflow-common:
     - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
     - ${AIRFLOW_PROJ_DIR:-.}/config:/opt/airflow/config
     - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
+    - ${AIRFLOW_PROJ_DIR:-.}/dbt:/opt/airflow/dbt
+    - duckdb-data:/data
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on:
     &airflow-common-depends-on
@@ -420,6 +424,26 @@ services:
     restart: always
     depends_on:
       minio:
+        condition: service_healthy
+
+  # DBT Analytics Transformations
+  dbt:
+    image: python:3.11-slim
+    container_name: claude_pipeline-dbt
+    volumes:
+      - ${AIRFLOW_PROJ_DIR:-.}/dbt:/usr/app/dbt
+      - duckdb-data:/data  # Shared with DuckDB container
+    environment:
+      DBT_PROFILES_DIR: /usr/app/dbt
+    working_dir: /usr/app/dbt
+    command: |
+      sh -c "
+        pip install dbt-core dbt-duckdb &&
+        tail -f /dev/null
+      "
+    restart: always
+    depends_on:
+      duckdb:
         condition: service_healthy
 
 volumes:
