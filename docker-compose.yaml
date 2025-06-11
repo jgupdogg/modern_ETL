@@ -390,7 +390,40 @@ services:
       start_period: 30s
     restart: always
 
+  # DuckDB Analytics Database
+  duckdb:
+    image: alpine:3.18
+    container_name: claude_pipeline-duckdb
+    ports:
+      - "3000:3000"     # DuckDB CLI access (optional)
+    environment:
+      DUCKDB_DATABASE_PATH: ${DUCKDB_DATABASE_PATH}
+      DUCKDB_S3_ENDPOINT: ${DUCKDB_S3_ENDPOINT}
+      DUCKDB_S3_ACCESS_KEY: ${DUCKDB_S3_ACCESS_KEY}
+      DUCKDB_S3_SECRET_KEY: ${DUCKDB_S3_SECRET_KEY}
+    volumes:
+      - duckdb-data:/data
+      - ${AIRFLOW_PROJ_DIR:-.}/scripts:/scripts
+    command: |
+      sh -c "
+        apk add --no-cache curl python3 py3-pip &&
+        pip3 install duckdb boto3 pytz &&
+        python3 /scripts/duckdb_init.py &&
+        tail -f /dev/null
+      "
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import duckdb; print('DuckDB OK')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: always
+    depends_on:
+      minio:
+        condition: service_healthy
+
 volumes:
   postgres-db-volume:
   redpanda-data:
   minio-data:
+  duckdb-data:
