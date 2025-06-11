@@ -250,3 +250,38 @@ For production deployment, consider:
 - NGROK_TOKEN is stored in `.env` for webhook tunneling
 - Redpanda configuration (brokers, topics) is stored in `.env`
 - MinIO configuration (credentials) is stored in `.env`
+
+## Infrastructure Learnings & Requirements
+
+### Critical Requirements
+1. **Java Dependency for PySpark**: PySpark requires Java to be installed. We use a custom Dockerfile that installs OpenJDK 17.
+2. **Custom Docker Image**: The `_PIP_ADDITIONAL_REQUIREMENTS` approach is only for testing. Production requires building a custom image with all dependencies.
+3. **Network Names**: Services must use internal Docker network names (e.g., `redpanda:9092`, `http://minio:9000`) not localhost when communicating between containers.
+
+### Airflow Configuration Issues
+1. **XCom Backend**: The default config may have incorrect xcom_backend settings. Use `airflow.models.xcom.BaseXCom`.
+2. **API Server vs Webserver**: Airflow 2.10.x uses `webserver` command, not `api-server`.
+3. **Health Check Endpoint**: Use `/health` endpoint, not `/api/v2/version` for container health checks.
+4. **Execution API URL**: Comment out `AIRFLOW__CORE__EXECUTION_API_SERVER_URL` if causing issues.
+
+### Service Dependencies
+1. **DAG Processor Issues**: May experience restart loops with certain configurations. Monitor with `docker ps`.
+2. **Worker Required**: Celery Executor requires airflow-worker service to be running for task execution.
+3. **Database Migrations**: Fresh installs work better than upgrades when config changes significantly.
+
+### Variable Management
+1. **Airflow Variables via CLI**: Use `docker compose run airflow-cli variables set KEY "VALUE"` for setting variables.
+2. **Required Variables for PySpark DAG**:
+   - REDPANDA_BROKERS (use internal name: `redpanda:9092`)
+   - WEBHOOK_TOPIC
+   - MINIO_ENDPOINT (use internal name: `http://minio:9000`)
+   - MINIO_ACCESS_KEY/SECRET_KEY
+   - MINIO_BUCKET
+   - LOCAL_DATA_PATH
+   - CHECKPOINT_PATH
+   - PROCESSING_WINDOW_MINUTES
+
+### Debugging Tips
+1. **Check Service Logs**: Use `docker logs <container-name>` for detailed error messages.
+2. **Orphan Containers**: The warning about orphan containers is normal and can be ignored.
+3. **PySpark Dependencies**: First run downloads Spark JARs which takes time (spark-sql-kafka, hadoop-aws, etc.).
