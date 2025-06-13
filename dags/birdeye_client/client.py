@@ -375,6 +375,26 @@ class BirdEyeAPIClient:
         
         return response.json()
     
+    def get_wallet_trade_history(self, wallet_address: str, limit: int = 100, **params) -> Dict[str, Any]:
+        """
+        Get trade history for a specific wallet address.
+        
+        Args:
+            wallet_address: Wallet address to get trades for
+            limit: Number of trades to return (max 100)
+            **params: Additional parameters
+            
+        Returns:
+            Wallet trade history data
+        """
+        params['wallet'] = wallet_address
+        params['limit'] = min(limit, 100)  # API max is typically 100
+        
+        url = BirdEyeEndpoints.build_url(BirdEyeEndpoints.WALLET_TRADE_HISTORY, params)
+        response = self._make_request('GET', url)
+        
+        return response.json()
+    
     def normalize_token_list_response(self, response: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
         Normalize token list API response to consistent format.

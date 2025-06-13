@@ -289,17 +289,44 @@ DuckDB is configured with S3/MinIO integration:
 
 ```
 Webhooks → Redpanda → PySpark (Bronze) → MinIO → DuckDB → Silver → MinIO
+Token Data → BirdEye API → Bronze Layers → Silver Transformations → Analytics
 ```
 
-**Bronze Layer**: `s3://webhook-data/processed-webhooks/`
-- Raw webhook data with processing metadata
-- Partitioned by `processing_date`
-- Contains duplicates and requires cleaning
+#### Data Layers Overview
 
-**Silver Layer**: `s3://webhook-data/silver-webhooks/`
+**Bronze Layer** (`s3://solana-data/bronze/`):
+- `token_whales/`: Raw whale holder data from BirdEye API
+- `wallet_transactions/`: Transaction history for whale wallets
+- `processed-webhooks/`: Raw webhook data with processing metadata
+- All partitioned by date with processing metadata
+
+**Silver Layer** (`s3://webhook-data/silver-webhooks/`):
 - `webhook_events/`: Cleaned, deduplicated event data
 - `transaction_details/`: Solana transaction-specific fields
 - `data_quality_metrics/`: Data quality monitoring
+
+#### Bronze Wallet Transactions Layer
+
+**Purpose**: Stores transaction history for whale wallets identified in the token analysis
+**Source**: BirdEye API wallet trade history endpoint
+**Schedule**: Every 6 hours via Airflow DAG
+
+**Schema Features**:
+- Complete transaction details (from/to tokens, amounts, prices)
+- Transaction type classification (BUY/SELL/UNKNOWN)
+- **PnL Processing Fields**: `processed_for_pnl`, `pnl_processed_at`, `pnl_processing_status`
+- Comprehensive metadata and batch tracking
+- Mock data fallback for API failures
+
+**Data Flow**:
+```
+Bronze Token Whales → Filter Unfetched → BirdEye API → Transform → Bronze Wallet Transactions
+```
+
+**Key Files**:
+- DAG: `dags/bronze_wallet_transactions_dag.py`
+- Output: `s3://solana-data/bronze/wallet_transactions/date=YYYY-MM-DD/`
+- Status: `status_BATCH_ID.json` with processed wallet tracking
 
 ### DuckDB Schema Structure
 
