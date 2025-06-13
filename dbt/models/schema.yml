@@ -87,3 +87,83 @@ models:
         tests:
           - dbt_utils.expression_is_true:
               expression: "<= total_events"
+
+  - name: bronze_tokens
+    description: "Deduplicated view of token data from BirdEye API"
+    columns:
+      - name: token_address
+        description: "Unique token contract address"
+        tests:
+          - unique
+          - not_null
+      
+      - name: processing_date
+        description: "Date when token data was processed"
+        tests:
+          - not_null
+
+  - name: silver_tracked_tokens
+    description: "Filtered and enriched tracked tokens for trading analysis"
+    columns:
+      - name: token_address
+        description: "Unique token contract address"
+        tests:
+          - unique
+          - not_null
+      
+      - name: symbol
+        description: "Token symbol"
+        tests:
+          - not_null
+      
+      - name: logoURI
+        description: "Token logo URI (required for UI display)"
+        tests:
+          - not_null
+      
+      - name: liquidity
+        description: "Token liquidity in USD"
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 10000"
+      
+      - name: volume24hUSD
+        description: "24-hour trading volume in USD"
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 50000"
+      
+      - name: price24hChangePercent
+        description: "24-hour price change percentage"
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 30"
+      
+      - name: volume_mcap_ratio
+        description: "Volume to market cap ratio"
+        tests:
+          - dbt_utils.expression_is_true:
+              expression: ">= 0.05"
+              where: "volume_mcap_ratio IS NOT NULL"
+      
+      - name: quality_score
+        description: "Calculated quality score (0-1 scale)"
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0 AND quality_score <= 1"
+      
+      - name: rank
+        description: "Liquidity-based ranking (1-50)"
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 1 AND rank <= 50"
+      
+      - name: processing_date
+        description: "Date of processing"
+        tests:
+          - not_null

@@ -33,3 +33,7 @@ vars:
   webhook_bucket: 'webhook-data'
   bronze_path: 'processed-webhooks'
   silver_path: 'silver-webhooks'
+  # Solana token data variables
+  solana_bucket: 'solana-data'
+  token_bronze_path: 'bronze/token_list_v3'
+  token_silver_path: 'silver/tracked_tokens'
