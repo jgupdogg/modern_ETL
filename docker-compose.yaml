@@ -297,6 +297,12 @@ services:
     environment:
       DATA_DIR: /app/data
       REDPANDA_BROKERS: redpanda:9092
+      # MinIO Configuration for Gold Layer Access
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      SOLANA_DATA_BUCKET: solana-data
+      MAX_WEBHOOK_ADDRESSES: 100
     volumes:
       - ${AIRFLOW_PROJ_DIR:-.}/data/webhooks:/app/data
     healthcheck:

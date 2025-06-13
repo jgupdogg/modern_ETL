@@ -26,16 +26,75 @@ class HeliusWebhookManager:
     
     def get_addresses(self) -> List[str]:
         """
-        Get addresses to monitor. For now, returns hardcoded addresses.
-        Later this can be replaced with database fetch.
+        Get addresses to monitor from gold.top_traders in MinIO.
+        Falls back to environment variable if gold layer unavailable.
         """
-        # TODO: Replace with actual address fetching logic
+        try:
+            # Try to fetch from gold layer first
+            gold_addresses = self._fetch_from_gold_layer()
+            if gold_addresses:
+                logger.info(f"Fetched {len(gold_addresses)} addresses from gold layer")
+                return gold_addresses
+        except Exception as e:
+            logger.warning(f"Failed to fetch from gold layer: {e}")
+        
+        # Fallback to environment variable
+        logger.info("Falling back to environment variable addresses")
         addresses_env = os.getenv("HELIUS_ADDRESSES", "")
         if addresses_env:
             return [addr.strip() for addr in addresses_env.split(",") if addr.strip()]
         
-        # Default addresses for testing
+        # Default empty list
+        logger.warning("No addresses found in gold layer or environment")
         return []
+    
+    def _fetch_from_gold_layer(self) -> List[str]:
+        """Fetch top trader addresses from gold layer in MinIO."""
+        import duckdb
+        
+        # Create in-memory DuckDB connection
+        conn = duckdb.connect()
+        
+        try:
+            # Configure S3/MinIO access
+            conn.execute("INSTALL httpfs;")
+            conn.execute("LOAD httpfs;")
+            
+            # Get MinIO configuration from environment
+            minio_endpoint = os.getenv("MINIO_ENDPOINT", "minio:9000")
+            minio_access_key = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
+            minio_secret_key = os.getenv("MINIO_SECRET_KEY", "minioadmin123")
+            solana_bucket = os.getenv("SOLANA_DATA_BUCKET", "solana-data")
+            
+            # Remove http:// prefix if present for DuckDB
+            endpoint = minio_endpoint.replace('http://', '').replace('https://', '')
+            
+            conn.execute(f"SET s3_endpoint='{endpoint}';")
+            conn.execute(f"SET s3_access_key_id='{minio_access_key}';")
+            conn.execute(f"SET s3_secret_access_key='{minio_secret_key}';")
+            conn.execute("SET s3_use_ssl=false;")
+            conn.execute("SET s3_url_style='path';")
+            
+            # Query ALL unique wallet addresses from gold layer
+            query = f"""
+            SELECT DISTINCT wallet_address 
+            FROM read_parquet('s3://{solana_bucket}/gold/top_traders/*.parquet') 
+            WHERE wallet_address IS NOT NULL
+              AND wallet_address != ''
+            ORDER BY wallet_address
+            """
+            
+            result = conn.execute(query).fetchall()
+            addresses = [row[0] for row in result if row[0]]
+            
+            logger.info(f"Successfully fetched {len(addresses)} addresses from gold layer")
+            return addresses
+            
+        except Exception as e:
+            logger.error(f"Error querying gold layer: {e}")
+            raise
+        finally:
+            conn.close()
     
     async def get_all_webhooks(self) -> List[Dict]:
         """Get all existing webhooks."""
