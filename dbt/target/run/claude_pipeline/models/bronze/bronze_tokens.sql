@@ -1,12 +1,11 @@
-{{
-    config(
-        materialized='view'
-    )
-}}
+
+  
+  create view "analytics"."main"."bronze_tokens__dbt_tmp" as (
+    
 
 WITH raw_tokens AS (
     SELECT *
-    FROM read_parquet('s3://{{ var("solana_bucket") }}/{{ var("token_bronze_path") }}/**/*.parquet', union_by_name=true)
+    FROM read_parquet('s3://solana-data/bronze/token_list_v3/**/*.parquet', union_by_name=true)
 ),
 
 deduplicated_tokens AS (
@@ -64,3 +63,4 @@ SELECT
 FROM deduplicated_tokens
 WHERE rn = 1  -- Keep only latest version of each token
   AND token_address IS NOT NULL
+  );

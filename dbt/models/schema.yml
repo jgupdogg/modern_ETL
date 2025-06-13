@@ -31,6 +31,21 @@ models:
         tests:
           - not_null
       
+      - name: whale_fetch_status
+        description: "Status of whale data fetching"
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['pending', 'fetched', 'failed']
+      
+      - name: whale_fetched_at
+        description: "Timestamp when whale data was fetched"
+      
+      - name: is_newly_tracked
+        description: "Whether this token was newly tracked in current run"
+        tests:
+          - not_null
+      
       - name: has_valid_json
         description: "Whether payload is valid JSON"
         tests:
@@ -89,7 +104,7 @@ models:
               expression: "<= total_events"
 
   - name: bronze_tokens
-    description: "Deduplicated view of token data from BirdEye API"
+    description: "Deduplicated view of token data from BirdEye API with processing state tracking"
     columns:
       - name: token_address
         description: "Unique token contract address"
@@ -101,6 +116,16 @@ models:
         description: "Date when token data was processed"
         tests:
           - not_null
+      
+      - name: processing_status
+        description: "Processing state for pipeline tracking"
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['unprocessed', 'silver_processed']
+      
+      - name: silver_processed_at
+        description: "Timestamp when processed by silver layer"
 
   - name: silver_tracked_tokens
     description: "Filtered and enriched tracked tokens for trading analysis"
@@ -165,5 +190,20 @@ models:
       
       - name: processing_date
         description: "Date of processing"
+        tests:
+          - not_null
+      
+      - name: whale_fetch_status
+        description: "Status of whale data fetching"
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['pending', 'fetched', 'failed']
+      
+      - name: whale_fetched_at
+        description: "Timestamp when whale data was fetched"
+      
+      - name: is_newly_tracked
+        description: "Whether this token was newly tracked in current run"
         tests:
           - not_null

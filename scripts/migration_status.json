@@ -1,0 +1,37 @@
+{
+  "token_list_v3": {
+    "completed_batches": 0,
+    "total_rows": 0,
+    "status": "pending"
+  },
+  "token_whales": {
+    "completed_batches": 0,
+    "total_rows": 0,
+    "status": "pending"
+  },
+  "wallet_trade_history": {
+    "completed_batches": 0,
+    "total_rows": 0,
+    "status": "pending"
+  },
+  "token_metadata": {
+    "completed_batches": 0,
+    "total_rows": 0,
+    "status": "pending"
+  },
+  "silver.tracked_tokens": {
+    "completed_batches": 0,
+    "total_rows": 0,
+    "status": "pending"
+  },
+  "silver.wallet_pnl": {
+    "completed_batches": 0,
+    "total_rows": 0,
+    "status": "pending"
+  },
+  "gold.top_traders": {
+    "completed_batches": 1,
+    "total_rows": 100,
+    "status": "completed"
+  }
+}

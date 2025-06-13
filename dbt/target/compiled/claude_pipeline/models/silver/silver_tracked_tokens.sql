@@ -1,11 +1,4 @@
-{{
-    config(
-        materialized='incremental',
-        unique_key='token_address',
-        on_schema_change='fail',
-        post_hook="COPY (SELECT * FROM {{ this }}) TO 's3://{{ var('solana_bucket') }}/{{ var('token_silver_path') }}/tracked_tokens.parquet' (FORMAT PARQUET, COMPRESSION SNAPPY);"
-    )
-}}
+
 
 WITH filtered_tokens AS (
     SELECT 
@@ -24,7 +17,7 @@ WITH filtered_tokens AS (
         batch_id,
         ingested_at,
         processing_date
-    FROM {{ ref('bronze_tokens') }}
+    FROM "analytics"."main"."bronze_tokens"
     WHERE 
         -- Processing state filter - only process unprocessed bronze tokens
         processing_status = 'unprocessed'
@@ -40,10 +33,7 @@ WITH filtered_tokens AS (
         AND price_change_4h_percent > 0
         AND price_change_8h_percent > 0
         AND price_change_24h_percent > 0
-        {% if is_incremental() %}
-        -- Only process new/updated data
-        AND processing_date > (SELECT MAX(processing_date) FROM {{ this }})
-        {% endif %}
+        
 ),
 
 calculated_metrics AS (

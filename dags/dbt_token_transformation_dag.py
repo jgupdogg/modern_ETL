@@ -114,9 +114,13 @@ conn.execute('SET s3_url_style=\\'path\\';')
 try:
     # Check bronze tokens exist and have data
     bronze_count = conn.execute('SELECT COUNT(*) FROM bronze_tokens;').fetchone()[0]
+    bronze_unprocessed = conn.execute('SELECT COUNT(*) FROM bronze_tokens WHERE processing_status = \\\"unprocessed\\\";').fetchone()[0]
+    bronze_processed = conn.execute('SELECT COUNT(*) FROM bronze_tokens WHERE processing_status = \\\"silver_processed\\\";').fetchone()[0]
     
     # Check silver tracked tokens 
     silver_count = conn.execute('SELECT COUNT(*) FROM silver_tracked_tokens;').fetchone()[0]
+    silver_pending_whales = conn.execute('SELECT COUNT(*) FROM silver_tracked_tokens WHERE whale_fetch_status = \\\"pending\\\";').fetchone()[0]
+    silver_newly_tracked = conn.execute('SELECT COUNT(*) FROM silver_tracked_tokens WHERE is_newly_tracked = true;').fetchone()[0]
     
     # Quality metrics
     avg_liquidity = conn.execute('SELECT AVG(liquidity) FROM silver_tracked_tokens;').fetchone()[0]
@@ -126,7 +130,7 @@ try:
     # Top token by liquidity
     top_token = conn.execute('SELECT symbol, liquidity FROM silver_tracked_tokens ORDER BY liquidity DESC LIMIT 1;').fetchone()
     
-    print(f'VALIDATION_RESULT:{{\\\"bronze_tokens\\\":{bronze_count},\\\"silver_tracked_tokens\\\":{silver_count},\\\"avg_liquidity\\\":{avg_liquidity or 0},\\\"avg_volume\\\":{avg_volume or 0},\\\"avg_quality_score\\\":{avg_quality_score or 0},\\\"top_token_symbol\\\":\\\"{top_token[0] if top_token else \\\"N/A\\\"}\\\",\\\"top_token_liquidity\\\":{top_token[1] if top_token else 0}}}')
+    print(f'VALIDATION_RESULT:{{\\\"bronze_tokens\\\":{bronze_count},\\\"bronze_unprocessed\\\":{bronze_unprocessed},\\\"bronze_processed\\\":{bronze_processed},\\\"silver_tracked_tokens\\\":{silver_count},\\\"silver_pending_whales\\\":{silver_pending_whales},\\\"silver_newly_tracked\\\":{silver_newly_tracked},\\\"avg_liquidity\\\":{avg_liquidity or 0},\\\"avg_volume\\\":{avg_volume or 0},\\\"avg_quality_score\\\":{avg_quality_score or 0},\\\"top_token_symbol\\\":\\\"{top_token[0] if top_token else \\\"N/A\\\"}\\\",\\\"top_token_liquidity\\\":{top_token[1] if top_token else 0}}}')
 except Exception as e:
     print(f'VALIDATION_ERROR:{e}')
 conn.close()
@@ -143,7 +147,11 @@ conn.close()
         return {
             'status': 'success',
             'bronze_tokens': validation_data['bronze_tokens'],
+            'bronze_unprocessed': validation_data['bronze_unprocessed'],
+            'bronze_processed': validation_data['bronze_processed'],
             'silver_tracked_tokens': validation_data['silver_tracked_tokens'],
+            'silver_pending_whales': validation_data['silver_pending_whales'],
+            'silver_newly_tracked': validation_data['silver_newly_tracked'],
             'avg_liquidity': validation_data['avg_liquidity'],
             'avg_volume': validation_data['avg_volume'],
             'avg_quality_score': validation_data['avg_quality_score'],

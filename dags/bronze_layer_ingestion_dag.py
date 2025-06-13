@@ -1,6 +1,6 @@
 """
-Bronze Layer Ingestion DAG
-Fetches token data from BirdEye API and stores in MinIO bronze layer
+Bronze Token List DAG
+Fetches token list data from BirdEye API v3 and stores in MinIO bronze layer
 """
 import os
 import json
@@ -9,8 +9,8 @@ import logging
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 from io import BytesIO
+import sys
 
-import requests
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -20,6 +20,9 @@ from botocore.client import Config
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.utils.dates import days_ago
+
+# Import the birdeye client from local dags directory
+from birdeye_client import BirdEyeAPIClient, TokenListSchema
 
 
 # Configuration
@@ -33,81 +36,10 @@ class TokenListConfig:
     min_price_change_24h_percent: int = 30
 
 
-# BirdEye API Client
-class BirdEyeAPIClient:
-    """Simple client for BirdEye API v3"""
-    
-    def __init__(self, api_key: str):
-        self.api_key = api_key
-        self.base_url = "https://public-api.birdeye.so"
-        self.headers = {
-            "X-API-KEY": api_key,
-            "Accept": "application/json"
-        }
-    
-    def get_token_list(self, **params) -> Dict[str, Any]:
-        """Get token list from v3 endpoint"""
-        endpoint = f"{self.base_url}/defi/v3/token/list"
-        response = requests.get(endpoint, headers=self.headers, params=params)
-        response.raise_for_status()
-        return response.json()
-
-
-# PyArrow Schema Definition
+# Use shared schema from the new client
 def get_token_schema() -> pa.Schema:
-    """Define PyArrow schema for token data"""
-    return pa.schema([
-        # Basic token info
-        pa.field("token_address", pa.string(), nullable=False),
-        pa.field("symbol", pa.string(), nullable=True),
-        pa.field("name", pa.string(), nullable=True),
-        pa.field("decimals", pa.int32(), nullable=True),
-        pa.field("logo_uri", pa.string(), nullable=True),
-        
-        # Market data
-        pa.field("market_cap", pa.float64(), nullable=True),
-        pa.field("fdv", pa.float64(), nullable=True),
-        pa.field("liquidity", pa.float64(), nullable=True),
-        pa.field("last_trade_unix_time", pa.int64(), nullable=True),
-        pa.field("holder", pa.int64(), nullable=True),
-        pa.field("recent_listing_time", pa.int64(), nullable=True),
-        
-        # Price data
-        pa.field("price", pa.float64(), nullable=True),
-        pa.field("price_change_1h_percent", pa.float64(), nullable=True),
-        pa.field("price_change_2h_percent", pa.float64(), nullable=True),
-        pa.field("price_change_4h_percent", pa.float64(), nullable=True),
-        pa.field("price_change_8h_percent", pa.float64(), nullable=True),
-        pa.field("price_change_24h_percent", pa.float64(), nullable=True),
-        
-        # Volume data
-        pa.field("volume_1h_usd", pa.float64(), nullable=True),
-        pa.field("volume_2h_usd", pa.float64(), nullable=True),
-        pa.field("volume_4h_usd", pa.float64(), nullable=True),
-        pa.field("volume_8h_usd", pa.float64(), nullable=True),
-        pa.field("volume_24h_usd", pa.float64(), nullable=True),
-        
-        # Volume change percentages
-        pa.field("volume_1h_change_percent", pa.float64(), nullable=True),
-        pa.field("volume_2h_change_percent", pa.float64(), nullable=True),
-        pa.field("volume_4h_change_percent", pa.float64(), nullable=True),
-        pa.field("volume_8h_change_percent", pa.float64(), nullable=True),
-        pa.field("volume_24h_change_percent", pa.float64(), nullable=True),
-        
-        # Trade counts
-        pa.field("trade_1h_count", pa.int64(), nullable=True),
-        pa.field("trade_2h_count", pa.int64(), nullable=True),
-        pa.field("trade_4h_count", pa.int64(), nullable=True),
-        pa.field("trade_8h_count", pa.int64(), nullable=True),
-        pa.field("trade_24h_count", pa.int64(), nullable=True),
-        
-        # Extensions (stored as string/JSON)
-        pa.field("extensions", pa.string(), nullable=True),
-        
-        # Ingestion metadata
-        pa.field("ingested_at", pa.timestamp('us'), nullable=False),
-        pa.field("batch_id", pa.string(), nullable=False),
-    ])
+    """Get token schema from shared client"""
+    return TokenListSchema.get_pyarrow_schema()
 
 
 def get_minio_client() -> boto3.client:
@@ -184,12 +116,8 @@ def fetch_token_list_v3(**context):
             
             response = birdeye_client.get_token_list(**params)
             
-            # Extract tokens
-            if isinstance(response, dict) and "data" in response and "items" in response["data"]:
-                tokens_data = response["data"]["items"]
-            else:
-                logger.warning(f"Unexpected response structure")
-                tokens_data = []
+            # Use the client's normalization method
+            tokens_data = birdeye_client.normalize_token_list_response(response)
             
             if not tokens_data:
                 has_more = False
@@ -214,12 +142,8 @@ def fetch_token_list_v3(**context):
     # Ensure we don't exceed limit
     all_tokens = all_tokens[:config.limit]
     
-    # Convert to DataFrame for easy manipulation
-    df = pd.json_normalize(all_tokens)
-    
-    # Rename 'address' column to 'token_address' if it exists
-    if 'address' in df.columns:
-        df.rename(columns={'address': 'token_address'}, inplace=True)
+    # Convert normalized tokens to DataFrame
+    df = pd.DataFrame(all_tokens)
     
     # Add ingestion metadata
     batch_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
@@ -300,12 +224,12 @@ default_args = {
 }
 
 dag = DAG(
-    'bronze_layer_ingestion',
+    'bronze_token_list',
     default_args=default_args,
-    description='Ingest data from external APIs to bronze layer in MinIO',
+    description='Fetch token list from BirdEye API to bronze layer in MinIO',
     schedule_interval='@hourly',
     catchup=False,
-    tags=['bronze', 'ingestion', 'birdeye'],
+    tags=['bronze', 'tokens', 'birdeye'],
 )
 
 # Define tasks
@@ -316,10 +240,5 @@ fetch_token_list_task = PythonOperator(
     dag=dag,
 )
 
-# Future tasks can be added here:
-# fetch_token_metadata_task = PythonOperator(...)
-# fetch_trending_tokens_task = PythonOperator(...)
-# fetch_wallet_trade_history_task = PythonOperator(...)
-
-# Task dependencies (when more tasks are added)
-# fetch_token_list_task >> trigger_silver_layer_task
+# This DAG focuses solely on token list ingestion
+# Other bronze layer tasks (metadata, trending tokens, etc.) will be separate DAGs
