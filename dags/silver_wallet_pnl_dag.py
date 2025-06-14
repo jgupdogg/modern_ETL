@@ -78,6 +78,12 @@ def get_silver_pnl_schema() -> StructType:
         StructField("processed_at", TimestampType(), False),
         StructField("batch_id", StringType(), False),
         StructField("data_source", StringType(), False),
+        
+        # Gold layer processing state tracking
+        StructField("processed_for_gold", BooleanType(), False),  # Default: False
+        StructField("gold_processed_at", TimestampType(), True),
+        StructField("gold_processing_status", StringType(), True),  # pending/completed/failed
+        StructField("gold_batch_id", StringType(), True),
     ])
 
 
@@ -434,7 +440,13 @@ def calculate_timeframe_pnl(spark: SparkSession, base_df: DataFrame, timeframe: 
         # Processing metadata
         current_timestamp().alias("processed_at"),
         lit("").alias("batch_id"),  # Will be updated later
-        lit("birdeye_v3").alias("data_source")
+        lit("birdeye_v3").alias("data_source"),
+        
+        # Gold layer processing state tracking (default values)
+        lit(False).alias("processed_for_gold"),
+        lit(None).cast("timestamp").alias("gold_processed_at"),
+        lit("pending").alias("gold_processing_status"),
+        lit(None).cast("string").alias("gold_batch_id")
     )
     
     logger.info(f"Timeframe {timeframe}: Generated {detailed_results.count()} PnL records")
@@ -476,7 +488,13 @@ def calculate_portfolio_pnl(spark: SparkSession, token_pnl_df: DataFrame) -> Dat
         spark_max("calculation_date").alias("calculation_date"),
         spark_max("processed_at").alias("processed_at"),
         spark_max("batch_id").alias("batch_id"),
-        spark_max("data_source").alias("data_source")
+        spark_max("data_source").alias("data_source"),
+        
+        # Gold processing state (take max to preserve any processing state)
+        spark_max("processed_for_gold").alias("processed_for_gold"),
+        spark_max("gold_processed_at").alias("gold_processed_at"),
+        spark_max("gold_processing_status").alias("gold_processing_status"), 
+        spark_max("gold_batch_id").alias("gold_batch_id")
     )
     
     # Add portfolio-specific fields
@@ -517,7 +535,13 @@ def calculate_portfolio_pnl(spark: SparkSession, token_pnl_df: DataFrame) -> Dat
         # Processing metadata
         col("processed_at"),
         col("batch_id"),
-        col("data_source")
+        col("data_source"),
+        
+        # Gold layer processing state tracking (inherited from token-level)
+        col("processed_for_gold"),
+        col("gold_processed_at"), 
+        col("gold_processing_status"),
+        col("gold_batch_id")
     )
     
     logger.info(f"Generated {portfolio_results.count()} portfolio PnL records")
