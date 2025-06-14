@@ -1,0 +1,329 @@
+"""
+Helius Integration Tasks
+
+Core business logic for updating Helius webhooks with top trader addresses.
+Extracted from webhook DAGs for use in the smart trader identification pipeline.
+"""
+import os
+import json
+import logging
+from datetime import datetime, timedelta
+from typing import Dict, Any, List, Optional
+from io import BytesIO
+
+import pandas as pd
+import pyarrow.parquet as pq
+import boto3
+from botocore.client import Config
+import requests
+from airflow.models import Variable
+
+
+# Configuration
+class HeliusConfig:
+    """Configuration for Helius webhook updates"""
+    api_base_url: str = "https://api.helius.xyz/v0"
+    max_addresses_per_webhook: int = 100  # Helius limit
+    webhook_type: str = "enhanced"
+    transaction_types: List[str] = ["SWAP", "TRANSFER"]
+    performance_tier_priority: List[str] = ["elite", "strong", "promising"]
+
+
+def get_minio_client() -> boto3.client:
+    """Create MinIO S3 client"""
+    return boto3.client(
+        's3',
+        endpoint_url='http://minio:9000',
+        aws_access_key_id='minioadmin',
+        aws_secret_access_key='minioadmin123',
+        config=Config(signature_version='s3v4')
+    )
+
+
+def read_latest_gold_traders() -> List[Dict[str, Any]]:
+    """Read the latest gold top traders from MinIO"""
+    logger = logging.getLogger(__name__)
+    s3_client = get_minio_client()
+    
+    try:
+        # List all gold top trader files
+        response = s3_client.list_objects_v2(
+            Bucket='solana-data',
+            Prefix='gold/top_traders/',
+            MaxKeys=1000
+        )
+        
+        if 'Contents' not in response:
+            logger.warning("No gold top trader files found")
+            return []
+        
+        # Filter for parquet files and sort by last modified
+        parquet_files = [
+            obj for obj in response['Contents'] 
+            if obj['Key'].endswith('.parquet') and 
+            not obj['Key'].endswith('_SUCCESS')
+        ]
+        
+        if not parquet_files:
+            logger.warning("No parquet files found in gold top traders")
+            return []
+        
+        # Sort by last modified to get most recent files
+        parquet_files.sort(key=lambda x: x['LastModified'], reverse=True)
+        
+        # Read the most recent batch of files (could be multiple due to partitioning)
+        all_traders = []
+        latest_batch_time = parquet_files[0]['LastModified']
+        
+        for file_obj in parquet_files:
+            # Only read files from the same batch (within 1 hour of latest)
+            if (latest_batch_time - file_obj['LastModified']).total_seconds() > 3600:
+                break
+                
+            try:
+                # Download and read parquet file
+                obj_response = s3_client.get_object(
+                    Bucket='solana-data', 
+                    Key=file_obj['Key']
+                )
+                parquet_data = obj_response['Body'].read()
+                
+                # Read parquet into pandas
+                table = pq.read_table(BytesIO(parquet_data))
+                df = table.to_pandas()
+                
+                # Convert to list of dicts
+                traders = df.to_dict('records')
+                all_traders.extend(traders)
+                
+                logger.info(f"Read {len(traders)} traders from {file_obj['Key']}")
+                
+            except Exception as e:
+                logger.warning(f"Error reading file {file_obj['Key']}: {e}")
+                continue
+        
+        # Sort by performance tier and rank
+        tier_order = {tier: i for i, tier in enumerate(HeliusConfig.performance_tier_priority)}
+        all_traders.sort(
+            key=lambda x: (
+                tier_order.get(x.get('performance_tier', 'promising'), 999),
+                x.get('trader_rank', 999)
+            )
+        )
+        
+        logger.info(f"Total gold traders read: {len(all_traders)}")
+        return all_traders
+        
+    except Exception as e:
+        logger.error(f"Error reading gold traders from MinIO: {e}")
+        return []
+
+
+def get_helius_api_key() -> str:
+    """Get Helius API key from Airflow Variables"""
+    try:
+        return Variable.get('HELIUS_API_KEY')
+    except:
+        # Fallback to environment variable
+        api_key = os.environ.get('HELIUS_API_KEY')
+        if not api_key:
+            raise ValueError("HELIUS_API_KEY not found in Airflow Variables or environment")
+        return api_key
+
+
+def get_current_webhook(api_key: str) -> Optional[Dict[str, Any]]:
+    """Get current webhook configuration from Helius"""
+    logger = logging.getLogger(__name__)
+    config = HeliusConfig()
+    
+    try:
+        headers = {"Content-Type": "application/json"}
+        response = requests.get(
+            f"{config.api_base_url}/webhooks?api-key={api_key}",
+            headers=headers,
+            timeout=30
+        )
+        response.raise_for_status()
+        
+        webhooks = response.json()
+        if not webhooks:
+            logger.warning("No webhooks found in Helius account")
+            return None
+            
+        # Use the first webhook
+        webhook = webhooks[0]
+        logger.info(f"Found webhook: {webhook.get('webhookID')}")
+        return webhook
+        
+    except Exception as e:
+        logger.error(f"Error fetching webhook from Helius: {e}")
+        return None
+
+
+def create_webhook(api_key: str, webhook_url: str, addresses: List[str]) -> Optional[str]:
+    """Create a new webhook in Helius"""
+    logger = logging.getLogger(__name__)
+    config = HeliusConfig()
+    
+    try:
+        headers = {"Content-Type": "application/json"}
+        payload = {
+            "webhookURL": webhook_url,
+            "transactionTypes": config.transaction_types,
+            "accountAddresses": addresses,
+            "webhookType": config.webhook_type
+        }
+        
+        response = requests.post(
+            f"{config.api_base_url}/webhooks?api-key={api_key}",
+            headers=headers,
+            json=payload,
+            timeout=30
+        )
+        response.raise_for_status()
+        
+        result = response.json()
+        webhook_id = result.get('webhookID')
+        logger.info(f"Created new webhook: {webhook_id}")
+        return webhook_id
+        
+    except Exception as e:
+        logger.error(f"Error creating webhook: {e}")
+        return None
+
+
+def update_webhook(api_key: str, webhook_id: str, webhook_url: str, addresses: List[str]) -> bool:
+    """Update existing webhook with new addresses"""
+    logger = logging.getLogger(__name__)
+    config = HeliusConfig()
+    
+    try:
+        headers = {"Content-Type": "application/json"}
+        payload = {
+            "webhookURL": webhook_url,
+            "transactionTypes": config.transaction_types,
+            "accountAddresses": addresses,
+            "webhookType": config.webhook_type
+        }
+        
+        response = requests.put(
+            f"{config.api_base_url}/webhooks/{webhook_id}?api-key={api_key}",
+            headers=headers,
+            json=payload,
+            timeout=30
+        )
+        response.raise_for_status()
+        
+        logger.info(f"Successfully updated webhook {webhook_id}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error updating webhook: {e}")
+        return False
+
+
+def update_helius_webhook(**context):
+    """
+    Update Helius webhook with addresses from gold top traders
+    
+    This is the main task function called by the DAG.
+    """
+    logger = logging.getLogger(__name__)
+    
+    try:
+        # Step 1: Read latest gold traders
+        logger.info("Reading latest gold top traders...")
+        gold_traders = read_latest_gold_traders()
+        
+        if not gold_traders:
+            logger.warning("No gold traders found, skipping webhook update")
+            return {
+                "status": "skipped",
+                "reason": "no_gold_traders",
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        
+        # Extract unique wallet addresses
+        wallet_addresses = list(set(
+            trader['wallet_address'] 
+            for trader in gold_traders 
+            if trader.get('wallet_address')
+        ))
+        
+        # Limit to max addresses per webhook
+        config = HeliusConfig()
+        if len(wallet_addresses) > config.max_addresses_per_webhook:
+            logger.info(f"Limiting addresses from {len(wallet_addresses)} to {config.max_addresses_per_webhook}")
+            wallet_addresses = wallet_addresses[:config.max_addresses_per_webhook]
+        
+        logger.info(f"Found {len(wallet_addresses)} unique wallet addresses to monitor")
+        
+        # Step 2: Get Helius API key
+        api_key = get_helius_api_key()
+        
+        # Step 3: Get or create webhook
+        current_webhook = get_current_webhook(api_key)
+        
+        if current_webhook:
+            webhook_id = current_webhook.get('webhookID')
+            webhook_url = current_webhook.get('webhookURL')
+            current_addresses = current_webhook.get('accountAddresses', [])
+            
+            logger.info(f"Current webhook has {len(current_addresses)} addresses")
+            
+            # Update existing webhook
+            success = update_webhook(api_key, webhook_id, webhook_url, wallet_addresses)
+            
+            if not success:
+                raise Exception("Failed to update webhook")
+                
+        else:
+            # Create new webhook - need webhook URL from Variable
+            try:
+                webhook_url = Variable.get('HELIUS_WEBHOOK_URL')
+            except:
+                logger.error("No existing webhook and HELIUS_WEBHOOK_URL not set")
+                return {
+                    "status": "failed",
+                    "reason": "no_webhook_url",
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+            
+            webhook_id = create_webhook(api_key, webhook_url, wallet_addresses)
+            if not webhook_id:
+                raise Exception("Failed to create webhook")
+        
+        # Step 4: Update tracking variables
+        Variable.set("helius_webhook_addresses_count", str(len(wallet_addresses)))
+        Variable.set("helius_webhook_last_update", datetime.utcnow().isoformat())
+        Variable.set("helius_webhook_id", webhook_id)
+        
+        # Get performance tier breakdown
+        tier_breakdown = {}
+        for trader in gold_traders[:len(wallet_addresses)]:
+            tier = trader.get('performance_tier', 'unknown')
+            tier_breakdown[tier] = tier_breakdown.get(tier, 0) + 1
+        
+        logger.info(f"✅ Successfully updated Helius webhook with {len(wallet_addresses)} addresses")
+        logger.info(f"Performance tier breakdown: {tier_breakdown}")
+        
+        return {
+            "status": "success",
+            "webhook_id": webhook_id,
+            "addresses_count": len(wallet_addresses),
+            "performance_tiers": tier_breakdown,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in Helius webhook update: {e}")
+        # Store error in Variable for monitoring
+        Variable.set("helius_webhook_last_error", str(e))
+        Variable.set("helius_webhook_last_error_time", datetime.utcnow().isoformat())
+        
+        # Return error info but don't raise - this is non-critical
+        return {
+            "status": "failed",
+            "error": str(e),
+            "timestamp": datetime.utcnow().isoformat()
+        }

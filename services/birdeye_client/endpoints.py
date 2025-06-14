@@ -43,8 +43,7 @@ class BirdEyeEndpoints:
     
     # Wallet endpoints
     WALLET_PORTFOLIO = "/v1/wallet/portfolio"
-    WALLET_TRANSACTIONS = "/v1/wallet/transactions"
-    WALLET_TRADE_HISTORY = "/defi/v3/wallet/trade-history"
+    WALLET_TRANSACTIONS = "/defi/v3/wallet/trade-history"
     
     @classmethod
     def build_url(cls, endpoint: str, params: Optional[Dict[str, Any]] = None) -> str:

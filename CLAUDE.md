@@ -241,16 +241,6 @@ For production deployment, consider:
 - Multiple streaming applications for different data types
 - Dead letter queues for error handling
 
-## Important Notes
-
-- The project currently has example DAGs disabled (`AIRFLOW__CORE__LOAD_EXAMPLES: 'false'`)
-- New DAGs are paused by default (`AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'`)
-- Ensure proper file permissions on Linux by setting `AIRFLOW_UID` in `.env` to your user ID
-- The Airflow image version is controlled via `AIRFLOW_IMAGE_NAME` in `.env`
-- NGROK_TOKEN is stored in `.env` for webhook tunneling
-- Redpanda configuration (brokers, topics) is stored in `.env`
-- MinIO configuration (credentials) is stored in `.env`
-
 ## DuckDB Analytics Integration
 
 The project includes DuckDB for analytical processing and silver layer transformations in the medallion architecture.
@@ -407,12 +397,98 @@ SELECT * FROM silver.data_quality_metrics;
 - **Storage Efficiency**: Parquet compression with date partitioning
 - **Deduplication**: 100% data integrity preservation
 
+## Smart Trader Identification Pipeline
+
+The project includes a comprehensive end-to-end pipeline for identifying and monitoring profitable cryptocurrency traders:
+
+### Pipeline Architecture
+
+```
+Bronze Layer → Silver Layer → Gold Layer → Helius Webhook
+```
+
+1. **Bronze Layer (Raw Data Ingestion)**:
+   - Token list from BirdEye API
+   - Token whale holders data
+   - Wallet transaction history
+   - All data stored in MinIO with date partitioning
+
+2. **Silver Layer (PySpark Transformations)**:
+   - Tracked high-performance tokens
+   - **FIFO PnL Calculation**: Full PySpark implementation with lot tracking
+   - Multi-timeframe analysis (all/week/month/quarter)
+   - Comprehensive trading metrics (ROI, win rate, holding time, etc.)
+
+3. **Gold Layer (Top Trader Selection)**:
+   - Filters for profitable wallets only
+   - Performance tier classification (elite/strong/promising)
+   - Maintains existing 28-field schema from database migration
+   - Incremental updates only for new profitable traders
+
+4. **Helius Integration**:
+   - Reads ALL traders from gold/top_traders
+   - Updates webhook with distinct wallet addresses
+   - Real-time transaction monitoring for smart money
+
+### Key Features
+
+- **PySpark FIFO Implementation**: Accurate profit/loss calculation with proper lot tracking
+- **State-Based Processing**: Tracks processing status to avoid duplicate work
+- **Modular Task Architecture**: Business logic separated into `/dags/tasks/` modules
+- **Production-Ready**: Full error handling, logging, and monitoring
+
+### Running the Smart Trader Pipeline
+
+```bash
+# Test individual tasks
+docker compose run airflow-cli airflow tasks test smart_trader_identification [task_name] 2025-06-14
+
+# Run the complete pipeline
+docker compose run airflow-cli airflow dags trigger smart_trader_identification
+
+# Monitor execution
+docker compose logs -f airflow-worker
+```
+
+### Task Overview
+
+1. **bronze_token_list**: Fetches latest token list from BirdEye API
+2. **silver_tracked_tokens**: Filters high-performance tokens based on criteria
+3. **bronze_token_whales**: Gets whale holders for tracked tokens
+4. **bronze_wallet_transactions**: Fetches transaction history for whale wallets
+5. **silver_wallet_pnl**: Calculates FIFO PnL metrics using PySpark
+6. **gold_top_traders**: Selects profitable wallets for monitoring
+7. **helius_webhook_update**: Updates Helius with all top trader addresses
+
 ## Infrastructure Learnings & Requirements
 
 ### Critical Requirements
 1. **Java Dependency for PySpark**: PySpark requires Java to be installed. We use a custom Dockerfile that installs OpenJDK 17.
 2. **Custom Docker Image**: The `_PIP_ADDITIONAL_REQUIREMENTS` approach is only for testing. Production requires building a custom image with all dependencies.
 3. **Network Names**: Services must use internal Docker network names (e.g., `redpanda:9092`, `http://minio:9000`) not localhost when communicating between containers.
+
+### PySpark Integration Fix (June 2025)
+**Issue**: PySpark tasks were failing with "up_for_retry" status in consolidated DAG.
+**Root Cause**: Task definition pattern mismatch between working streaming DAG and consolidated DAG.
+
+**Solution Applied**:
+1. **Task Pattern**: Changed from `PythonOperator` to `@task(dag=dag)` decorator pattern
+2. **SparkSession Location**: Moved SparkSession creation inside task function (not in helper modules)
+3. **Docker Dependencies**: Updated `Dockerfile.airflow` with Java 17 + PySpark 3.5.0 + PyArrow + boto3
+4. **JAR Configuration**: Used exact JAR packages from working streaming DAG
+
+**Key Learning**: Working PySpark pattern in Airflow:
+```python
+@task(dag=dag)
+def my_pyspark_task(**context):
+    from pyspark.sql import SparkSession
+    spark = SparkSession.builder.appName("MyApp").config(...).getOrCreate()
+    try:
+        # PySpark logic here
+        pass
+    finally:
+        spark.stop()
+```
 
 ### Airflow Configuration Issues
 1. **XCom Backend**: The default config may have incorrect xcom_backend settings. Use `airflow.models.xcom.BaseXCom`.
@@ -440,4 +516,15 @@ SELECT * FROM silver.data_quality_metrics;
 ### Debugging Tips
 1. **Check Service Logs**: Use `docker logs <container-name>` for detailed error messages.
 2. **Orphan Containers**: The warning about orphan containers is normal and can be ignored.
-3. **PySpark Dependencies**: First run downloads Spark JARs which takes time (spark-sql-kafka, hadoop-aws, etc.).
+3. **PySpark Dependencies**: First run downloads Spark JARs which takes time (spark-sql-kafka, hadoop-aws, etc.)
+
+## Important Notes
+
+- The project currently has example DAGs disabled (`AIRFLOW__CORE__LOAD_EXAMPLES: 'false'`)
+- New DAGs are paused by default (`AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'`)
+- Ensure proper file permissions on Linux by setting `AIRFLOW_UID` in `.env` to your user ID
+- The Airflow image version is controlled via `AIRFLOW_IMAGE_NAME` in `.env`
+- NGROK_TOKEN is stored in `.env` for webhook tunneling
+- Redpanda configuration (brokers, topics) is stored in `.env`
+- MinIO configuration (credentials) is stored in `.env`
+- **PySpark Fix**: Use `@task` decorator pattern with SparkSession created inside task function

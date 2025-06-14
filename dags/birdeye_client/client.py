@@ -375,7 +375,7 @@ class BirdEyeAPIClient:
         
         return response.json()
     
-    def get_wallet_trade_history(self, wallet_address: str, limit: int = 100, **params) -> Dict[str, Any]:
+    def get_wallet_transactions(self, wallet_address: str, limit: int = 100, **params) -> Dict[str, Any]:
         """
         Get trade history for a specific wallet address.
         
@@ -390,7 +390,7 @@ class BirdEyeAPIClient:
         params['wallet'] = wallet_address
         params['limit'] = min(limit, 100)  # API max is typically 100
         
-        url = BirdEyeEndpoints.build_url(BirdEyeEndpoints.WALLET_TRADE_HISTORY, params)
+        url = BirdEyeEndpoints.build_url(BirdEyeEndpoints.WALLET_TRANSACTIONS, params)
         response = self._make_request('GET', url)
         
         return response.json()
