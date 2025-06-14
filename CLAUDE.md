@@ -290,6 +290,7 @@ DuckDB is configured with S3/MinIO integration:
 ```
 Webhooks → Redpanda → PySpark (Bronze) → MinIO → DuckDB → Silver → MinIO
 Token Data → BirdEye API → Bronze Layers → Silver Transformations → Analytics
+Whale Wallets → BirdEye API → Bronze Transactions → PySpark PnL → Silver Analytics
 ```
 
 #### Data Layers Overview
@@ -300,10 +301,15 @@ Token Data → BirdEye API → Bronze Layers → Silver Transformations → Anal
 - `processed-webhooks/`: Raw webhook data with processing metadata
 - All partitioned by date with processing metadata
 
-**Silver Layer** (`s3://webhook-data/silver-webhooks/`):
-- `webhook_events/`: Cleaned, deduplicated event data
-- `transaction_details/`: Solana transaction-specific fields
-- `data_quality_metrics/`: Data quality monitoring
+**Silver Layer**:
+- **Webhook Data** (`s3://webhook-data/silver-webhooks/`):
+  - `webhook_events/`: Cleaned, deduplicated event data
+  - `transaction_details/`: Solana transaction-specific fields  
+  - `data_quality_metrics/`: Data quality monitoring
+- **Wallet Analytics** (`s3://solana-data/silver/wallet_pnl/`):
+  - Token-level PnL metrics with FIFO cost basis calculation
+  - Portfolio-level aggregated performance analytics
+  - Multi-timeframe analysis (all/week/month/quarter periods)
 
 #### Bronze Wallet Transactions Layer
 
@@ -327,6 +333,45 @@ Bronze Token Whales → Filter Unfetched → BirdEye API → Transform → Bronz
 - DAG: `dags/bronze_wallet_transactions_dag.py`
 - Output: `s3://solana-data/bronze/wallet_transactions/date=YYYY-MM-DD/`
 - Status: `status_BATCH_ID.json` with processed wallet tracking
+
+#### Silver Wallet PnL Layer
+
+**Purpose**: Calculates comprehensive profit/loss metrics for whale wallets using FIFO methodology
+**Source**: Bronze wallet transactions layer (unprocessed records)
+**Schedule**: Every 12 hours via Airflow DAG
+**Technology**: PySpark with S3A integration
+
+**PnL Features**:
+- **FIFO Cost Basis**: First-in-first-out lot tracking for accurate PnL calculation
+- **Multi-Timeframe Analysis**: all/week/month/quarter periods
+- **Token-Level Metrics**: Individual token performance per wallet
+- **Portfolio-Level Aggregation**: Combined metrics across all tokens
+- **Trading Analytics**: Win rate, ROI, holding time, trade frequency
+
+**Schema Structure** (23 comprehensive fields):
+- **Core PnL**: realized_pnl, unrealized_pnl, total_pnl
+- **Trading Metrics**: trade_count, win_rate, total_bought, total_sold, roi
+- **Position Data**: current_position_tokens, current_position_cost_basis, current_position_value
+- **Time Analytics**: avg_holding_time_hours, trade_frequency_daily
+- **Processing Metadata**: calculation_date, time_period, batch_id, processed_at
+
+**Data Flow**:
+```
+Bronze Wallet Transactions → Filter Unprocessed → PySpark FIFO UDF → Silver PnL Metrics
+                           ↓
+Update Bronze Processing Status (processed_for_pnl = true)
+```
+
+**Output Structure**:
+- **Token-Level PnL**: `s3://solana-data/silver/wallet_pnl/` (partitioned by year/month/timeframe)
+- **Portfolio-Level PnL**: Same location with `token_address = "ALL_TOKENS"`
+- **Processing Efficiency**: Handles unprocessed transactions only
+- **Success Markers**: `_SUCCESS_BATCH_ID` files for monitoring
+
+**Key Files**:
+- DAG: `dags/silver_wallet_pnl_dag.py`
+- UDF Implementation: FIFO cost basis calculation with lot tracking
+- Output: `s3://solana-data/silver/wallet_pnl/calculation_year=YYYY/calculation_month=MM/time_period=PERIOD/`
 
 ### DuckDB Schema Structure
 
