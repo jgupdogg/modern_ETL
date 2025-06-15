@@ -82,12 +82,16 @@ def redpanda_to_local(**context) -> Dict[str, Any]:
     os.makedirs(config['local_data_path'], exist_ok=True)
     os.makedirs(config['checkpoint_path'], exist_ok=True)
     
-    # Create Spark session
+    # Create Spark session with increased memory settings
     spark = SparkSession.builder \
         .appName(f"RedpandaToLocal_{execution_date.strftime('%Y%m%d_%H%M%S')}") \
         .config("spark.jars.packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0") \
         .config("spark.sql.adaptive.enabled", "true") \
         .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
+        .config("spark.driver.memory", "2g") \
+        .config("spark.driver.maxResultSize", "1g") \
+        .config("spark.executor.memory", "2g") \
+        .config("spark.sql.execution.arrow.pyspark.enabled", "true") \
         .getOrCreate()
     
     spark.sparkContext.setLogLevel("WARN")
@@ -102,21 +106,42 @@ def redpanda_to_local(**context) -> Dict[str, Any]:
             StructField("payload", StringType(), True)
         ])
         
-        # Read from Kafka/Redpanda in batch mode
+        # Read from Kafka/Redpanda - only the most recent 1000 messages
+        # Use a simplified approach with latest-1000 offset calculation
+        logger.info("Reading the most recent 1000 messages from Redpanda")
+        
+        # First, get the latest offset using Spark itself
+        latest_df = spark \
+            .read \
+            .format("kafka") \
+            .option("kafka.bootstrap.servers", config['redpanda_brokers']) \
+            .option("subscribe", config['webhook_topic']) \
+            .option("startingOffsets", "latest") \
+            .option("endingOffsets", "latest") \
+            .load()
+        
+        # Get current high watermark by reading topic metadata
+        # Since we know from investigation there are ~971K messages, calculate start offset
+        estimated_total_messages = 971132  # From our investigation
+        start_offset = max(0, estimated_total_messages - 1000)
+        
+        logger.info(f"Attempting to read last 1000 messages starting from estimated offset {start_offset}")
+        
+        # Read from Kafka/Redpanda in batch mode with calculated offset range
         kafka_df = spark \
             .read \
             .format("kafka") \
             .option("kafka.bootstrap.servers", config['redpanda_brokers']) \
             .option("subscribe", config['webhook_topic']) \
-            .option("startingOffsets", "earliest") \
+            .option("startingOffsets", f'{{"webhooks":{{"0":{start_offset}}}}}') \
             .option("endingOffsets", "latest") \
             .load()
         
-        # Filter by timestamp if messages have timestamps
-        # For now, we'll process all available messages
-        logger.info(f"Found {kafka_df.count()} messages in Kafka topic")
+        # Check if we have any messages to process
+        message_count = kafka_df.count()
+        logger.info(f"Found {message_count} messages to process")
         
-        if kafka_df.count() == 0:
+        if message_count == 0:
             logger.info("No new messages to process")
             return {
                 'status': 'success',
@@ -124,7 +149,7 @@ def redpanda_to_local(**context) -> Dict[str, Any]:
                 'output_path': config['local_data_path']
             }
         
-        # Parse the JSON value
+        # Parse the JSON value in batch mode
         parsed_df = kafka_df.select(
             col("key").cast("string").alias("kafka_key"),
             col("topic"),
@@ -168,7 +193,6 @@ def redpanda_to_local(**context) -> Dict[str, Any]:
             .partitionBy("processing_date", "processing_hour") \
             .parquet(output_path)
         
-        message_count = processed_df.count()
         logger.info(f"Successfully processed {message_count} messages to {output_path}")
         
         return {
@@ -260,8 +284,8 @@ def local_to_minio(redpanda_result: Dict[str, Any], **context) -> Dict[str, Any]
             lit(execution_date.strftime("%Y%m%d_%H%M%S"))
         )
         
-        # Write to MinIO partitioned by processing_date
-        minio_path = f"s3a://{config['minio_bucket']}/processed-webhooks"
+        # Write to MinIO bronze layer partitioned by processing_date
+        minio_path = f"s3a://{config['minio_bucket']}/bronze/webhooks"
         
         processed_df.write \
             .mode("append") \

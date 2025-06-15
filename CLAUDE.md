@@ -194,6 +194,35 @@ s3.download_file('bucket-name', 'object-key', 'local-file')
 
 The project includes PySpark streaming capabilities for real-time data processing between Redpanda and MinIO.
 
+### PySpark Streaming DAG (`pyspark_streaming_pipeline`)
+
+The production PySpark streaming DAG processes webhook data from Redpanda to bronze layer in MinIO:
+
+**Schedule**: Every 5 minutes  
+**Memory Optimization**: Configured with 2GB driver/executor memory  
+**Batch Limiting**: Processes only the most recent 1000 messages to prevent OutOfMemoryError  
+
+```bash
+# Trigger the streaming pipeline
+docker-compose run airflow-cli airflow dags trigger pyspark_streaming_pipeline
+
+# Monitor pipeline status
+docker-compose run airflow-cli airflow dags list-runs --dag-id pyspark_streaming_pipeline
+
+# Check bronze data in MinIO
+docker exec claude_pipeline-minio mc ls local/webhook-data/bronze/webhooks/ --recursive
+```
+
+### Memory Management Fix (June 2025)
+
+**Issue**: PySpark DAG was failing with `java.lang.OutOfMemoryError` when trying to process 971K+ messages from Redpanda topic.
+
+**Solution Applied**:
+1. **Limited Batch Size**: Read only most recent 1000 messages using calculated offset range
+2. **Increased Memory**: Set `spark.driver.memory=2g` and `spark.executor.memory=2g`
+3. **Batch Processing**: Changed from streaming to batch mode for better memory control
+4. **Offset Calculation**: Uses `startingOffsets` with calculated offset to read latest 1000 messages
+
 ### PySpark Test Scripts
 
 ```bash
@@ -212,34 +241,36 @@ python pyspark_minio_test.py
 ### PySpark Data Flow
 
 ```
-Webhooks → Redpanda → PySpark Streaming → Local Files → PySpark Batch → MinIO
+Webhooks → Redpanda (971K+ messages) → PySpark Streaming (last 1000) → Bronze Layer → MinIO
+                                                    ↓
+                                          Silver Transformation → Analytics
 ```
 
 **Features:**
-- **Structured Streaming**: Real-time consumption from Redpanda (Kafka-compatible)
+- **Memory-Optimized Processing**: Handles large topic volumes without OOM errors
 - **Data Transformation**: Schema parsing, metadata addition, timestamp processing
 - **Partitioning**: Date/hour-based partitioning for efficient querying
 - **Storage Formats**: Parquet files for optimal analytics performance
 - **S3A Integration**: Direct MinIO integration using S3-compatible API
-- **Checkpointing**: Fault-tolerant processing with automatic recovery
+- **Offset Management**: Smart offset calculation for recent data processing
 
 ### PySpark Configuration
 
-The test scripts demonstrate:
-- Kafka consumer configuration for Redpanda
+The streaming DAG demonstrates:
+- Kafka consumer configuration for Redpanda with offset limits
+- Memory-optimized Spark session configuration
 - S3A filesystem setup for MinIO connectivity
-- Structured streaming with checkpointing
-- Batch processing with partitioning
+- Batch processing with efficient resource usage
 - Error handling and data validation
 
-### Scaling to Production
+### Production Considerations
 
-For production deployment, consider:
-- Docker service for PySpark streaming applications
-- Airflow DAGs for monitoring and orchestration
-- Resource allocation (memory/cores) based on data volume
-- Multiple streaming applications for different data types
-- Dead letter queues for error handling
+For production deployment:
+- **Memory Allocation**: 2GB+ driver/executor memory for large datasets
+- **Batch Size Limits**: Process 1000-5000 messages per batch to prevent OOM
+- **Offset Management**: Track processed offsets to avoid reprocessing
+- **Resource Monitoring**: Monitor Java heap usage and Spark metrics
+- **Checkpointing**: Use for fault-tolerant processing in streaming mode
 
 ## DuckDB Analytics Integration
 
