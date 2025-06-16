@@ -958,16 +958,12 @@ if PYSPARK_AVAILABLE:
                 when(col("was_processed") == True, "completed").otherwise(col("pnl_processing_status"))
             ).drop("was_processed")
             
-            # Write updated data back to bronze layer with proper partitioning
-            partitioned_df = updated_df.withColumn(
-                "processing_date", 
-                expr("date(timestamp)")
-            )
-            
-            partitioned_df.write \
-                .partitionBy("processing_date") \
+            # Write updated data back to original bronze layer location
+            # Use the existing date column for partitioning (maintains original structure)
+            updated_df.write \
+                .partitionBy("date") \
                 .mode("overwrite") \
-                .parquet("s3a://solana-data/bronze/wallet_transactions_updated/")
+                .parquet("s3a://solana-data/bronze/wallet_transactions/")
             
             logger.info("Successfully updated bronze layer processing status")
             

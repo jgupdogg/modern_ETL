@@ -6,6 +6,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is an Apache Airflow project for orchestrating data pipelines, using Docker Compose for containerization. The project uses Celery Executor for distributed task execution and includes PostgreSQL for metadata storage, Redis as the Celery message broker, Redpanda for event streaming, and MinIO for object storage.
 
+**The project has TWO main data pipelines:**
+
+1. **Smart Trader Identification Pipeline** (✅ PRODUCTION READY)
+   - **Purpose**: Identifies profitable Solana traders via BirdEye API analysis
+   - **Data Location**: `s3://solana-data/` bucket in MinIO
+   - **DAG**: `smart_trader_identification_dag`
+   - **Documentation**: See `SMART_TRADER_PIPELINE.md`
+
+2. **Webhook Notification Pipeline** (🚧 IN DEVELOPMENT)
+   - **Purpose**: Real-time blockchain event processing via Helius webhooks
+   - **Data Location**: `s3://webhook-data/` bucket in MinIO  
+   - **Components**: FastAPI webhook listener, PySpark streaming, DuckDB analytics
+   - **Status**: Core infrastructure complete, analytics layer in development
+
 ## Key Commands
 
 ### Starting and Managing Airflow
@@ -428,68 +442,47 @@ SELECT * FROM silver.data_quality_metrics;
 - **Storage Efficiency**: Parquet compression with date partitioning
 - **Deduplication**: 100% data integrity preservation
 
-## Smart Trader Identification Pipeline
+## Pipeline-Specific Commands
 
-The project includes a comprehensive end-to-end pipeline for identifying and monitoring profitable cryptocurrency traders:
+### Smart Trader Identification Pipeline
 
-### Pipeline Architecture
-
-```
-Bronze Layer → Silver Layer → Gold Layer → Helius Webhook
-```
-
-1. **Bronze Layer (Raw Data Ingestion)**:
-   - Token list from BirdEye API
-   - Token whale holders data
-   - Wallet transaction history
-   - All data stored in MinIO with date partitioning
-
-2. **Silver Layer (PySpark Transformations)**:
-   - Tracked high-performance tokens
-   - **FIFO PnL Calculation**: Full PySpark implementation with lot tracking
-   - Multi-timeframe analysis (all/week/month/quarter)
-   - Comprehensive trading metrics (ROI, win rate, holding time, etc.)
-
-3. **Gold Layer (Top Trader Selection)**:
-   - Filters for profitable wallets only
-   - Performance tier classification (elite/strong/promising)
-   - Maintains existing 28-field schema from database migration
-   - Incremental updates only for new profitable traders
-
-4. **Helius Integration**:
-   - Reads ALL traders from gold/top_traders
-   - Updates webhook with distinct wallet addresses
-   - Real-time transaction monitoring for smart money
-
-### Key Features
-
-- **PySpark FIFO Implementation**: Accurate profit/loss calculation with proper lot tracking
-- **State-Based Processing**: Tracks processing status to avoid duplicate work
-- **Modular Task Architecture**: Business logic separated into `/dags/tasks/` modules
-- **Production-Ready**: Full error handling, logging, and monitoring
-
-### Running the Smart Trader Pipeline
+**Data Location**: `s3://solana-data/` (see `SMART_TRADER_PIPELINE.md` for full details)
 
 ```bash
-# Test individual tasks
-docker compose run airflow-cli airflow tasks test smart_trader_identification [task_name] 2025-06-14
-
-# Run the complete pipeline
+# Run complete pipeline
 docker compose run airflow-cli airflow dags trigger smart_trader_identification
 
-# Monitor execution
+# Individual pipeline components
+docker compose run airflow-cli airflow dags trigger bronze_token_whales
+docker compose run airflow-cli airflow dags trigger silver_wallet_pnl  
+docker compose run airflow-cli airflow dags trigger gold_top_traders
+
+# Monitor pipeline execution
 docker compose logs -f airflow-worker
+
+# DuckDB analytics
+docker exec claude_pipeline-duckdb python3 /scripts/analyze_silver_pnl_data.py
 ```
 
-### Task Overview
+### Webhook Notification Pipeline  
 
-1. **bronze_token_list**: Fetches latest token list from BirdEye API
-2. **silver_tracked_tokens**: Filters high-performance tokens based on criteria
-3. **bronze_token_whales**: Gets whale holders for tracked tokens
-4. **bronze_wallet_transactions**: Fetches transaction history for whale wallets
-5. **silver_wallet_pnl**: Calculates FIFO PnL metrics using PySpark
-6. **gold_top_traders**: Selects profitable wallets for monitoring
-7. **helius_webhook_update**: Updates Helius with all top trader addresses
+**Data Location**: `s3://webhook-data/`
+
+```bash
+# PySpark streaming pipeline (processes webhooks → bronze layer)
+docker compose run airflow-cli airflow dags trigger pyspark_streaming_pipeline
+
+# Silver webhook transformations (DuckDB-based)
+docker compose run airflow-cli airflow dags trigger silver_webhook_transformation
+
+# Test webhook ingestion
+curl -X POST http://localhost:8000/webhooks \
+  -H "Content-Type: application/json" \
+  -d '{"test": "data", "value": 123}'
+
+# Monitor webhook processing
+docker exec claude_pipeline-duckdb python3 /scripts/duckdb_minio_test.py
+```
 
 ## Infrastructure Learnings & Requirements
 

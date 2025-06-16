@@ -481,9 +481,11 @@ def silver_wallet_pnl_task(**context):
                     when(col("was_processed") == True, "completed").otherwise(col("pnl_processing_status"))
                 ).drop("was_processed")
                 
-                # Write updated bronze data
-                bronze_updated_path = "s3a://solana-data/bronze/wallet_transactions_updated/"
-                bronze_df_updated.write.mode("overwrite").parquet(bronze_updated_path)
+                # Write updated bronze data back to original location
+                bronze_df_updated.write \
+                    .partitionBy("date") \
+                    .mode("overwrite") \
+                    .parquet("s3a://solana-data/bronze/wallet_transactions/")
                 
                 unique_wallets = clean_df.select("wallet_address").distinct().count()
                 total_records = final_results.count()

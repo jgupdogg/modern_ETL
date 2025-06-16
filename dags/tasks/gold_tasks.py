@@ -379,28 +379,18 @@ if PYSPARK_AVAILABLE:
             logger.warning("No top traders to write")
             return None
         
-        # Add partitioning columns for efficient querying
-        partitioned_df = traders_df.withColumn(
-            "ingestion_year", expr("year(created_at)")
-        ).withColumn(
-            "ingestion_month", expr("month(created_at)")
-        ).withColumn(
-            "performance_tier_partition", col("performance_tier")
-        )
-        
-        # Write to MinIO with partitioning
+        # Write to MinIO without partitioning (small dataset, better performance)
         output_path = "s3a://solana-data/gold/top_traders/"
         
         try:
-            partitioned_df.write \
-                .partitionBy("ingestion_year", "ingestion_month", "performance_tier_partition") \
+            traders_df.write \
                 .mode("append") \
                 .parquet(output_path)
             
             logger.info(f"Successfully wrote {traders_df.count()} top traders to {output_path}")
             
-            # Write success marker
-            success_path = f"s3a://solana-data/gold/top_traders/ingestion_year={datetime.now().year}/ingestion_month={datetime.now().month}/_SUCCESS_{batch_id}"
+            # Write success marker (simplified path)
+            success_path = f"s3a://solana-data/gold/top_traders/_SUCCESS_{batch_id}"
             
             # Create empty success file
             spark.createDataFrame([("success",)], ["status"]).coalesce(1).write.mode("overwrite").text(success_path)
@@ -482,16 +472,16 @@ if PYSPARK_AVAILABLE:
                 expr("month(current_timestamp())")
             )
             
-            # Write to temporary location first, then move
-            temp_path = f"s3a://solana-data/silver/wallet_pnl_updated_{gold_batch_id}/"
+            # Write updated data back to original silver layer location
+            original_path = "s3a://solana-data/silver/wallet_pnl/"
             
             partitioned_df.write \
                 .partitionBy("calculation_year", "calculation_month", "time_period") \
                 .mode("overwrite") \
-                .parquet(temp_path)
+                .parquet(original_path)
             
             logger.info(f"Successfully updated silver layer processing status for batch {gold_batch_id}")
-            logger.info(f"Updated data written to: {temp_path}")
+            logger.info(f"Updated data written to: {original_path}")
             
         except Exception as e:
             logger.error(f"Error updating silver processing status: {e}")
