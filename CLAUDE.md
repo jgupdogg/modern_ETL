@@ -92,6 +92,22 @@ The project uses the official Apache Airflow Docker setup with the following ser
    - Production: Create a custom Dockerfile and uncomment the `build: .` line in docker-compose.yaml
 4. Configuration changes can be made in `config/airflow.cfg`
 
+## 📁 Project Organization
+
+### Scripts Directory Structure
+The `/scripts/` directory is organized by purpose:
+
+- **`scripts/analysis/`** - Data analysis and exploration scripts
+- **`scripts/duckdb/`** - DuckDB analytics and integration
+- **`scripts/infrastructure/`** - Infrastructure setup and testing
+- **`scripts/migration/`** - Data migration utilities
+- **`scripts/pyspark/`** - PySpark testing and integration
+- **`scripts/tests/`** - Testing, debugging, and validation
+- **`scripts/webhook/`** - Webhook processing and event streaming
+
+### Notebooks Directory
+The `/notebooks/` directory contains Jupyter notebooks for interactive data exploration and analysis.
+
 ## 🔧 Pipeline Configuration
 
 ### Centralized Configuration System
