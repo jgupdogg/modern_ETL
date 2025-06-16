@@ -18,6 +18,9 @@ from airflow.utils.dates import days_ago
 import sys
 sys.path.append('/opt/airflow/dags')
 
+# Import centralized configuration
+from config.smart_trader_config import get_spark_config
+
 def bronze_token_list_task(**context):
     """Task 1: Fetch token list from BirdEye API"""
     from tasks.bronze_tasks import fetch_bronze_token_list
@@ -93,19 +96,15 @@ def silver_wallet_pnl_task(**context):
     execution_date = context['logical_date']
     batch_id = execution_date.strftime("%Y%m%d_%H%M%S")
     
-    # Create Spark session with S3A/MinIO support
-    spark = SparkSession.builder \
-        .appName(f"SilverWalletPnL_{batch_id}") \
-        .config("spark.jars.packages", "org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.367") \
-        .config("spark.hadoop.fs.s3a.endpoint", "http://minio:9000") \
-        .config("spark.hadoop.fs.s3a.access.key", "minioadmin") \
-        .config("spark.hadoop.fs.s3a.secret.key", "minioadmin123") \
-        .config("spark.hadoop.fs.s3a.path.style.access", "true") \
-        .config("spark.hadoop.fs.s3a.connection.ssl.enabled", "false") \
-        .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem") \
-        .config("spark.sql.adaptive.enabled", "true") \
-        .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
-        .getOrCreate()
+    # Create Spark session with S3A/MinIO support using centralized config
+    spark_config = get_spark_config()
+    spark_builder = SparkSession.builder.appName(f"SilverWalletPnL_{batch_id}")
+    
+    # Apply all config settings
+    for key, value in spark_config.items():
+        spark_builder = spark_builder.config(key, value)
+    
+    spark = spark_builder.getOrCreate()
     
     spark.sparkContext.setLogLevel("WARN")
     

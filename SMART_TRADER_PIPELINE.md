@@ -334,6 +334,57 @@ docker exec claude_pipeline-duckdb python3 /scripts/analyze_silver_pnl_data.py
 - **boto3**: S3/MinIO integration
 - **pandas**: Data manipulation for smaller datasets
 
+## 🔧 Configuration Management
+
+### Centralized Configuration System
+The pipeline uses a centralized configuration system located in `dags/config/smart_trader_config.py` with **67 configurable parameters** organized by layer:
+
+#### Configuration Structure
+```python
+# API Configuration & Limits (5 parameters)
+API_RATE_LIMIT_DELAY = 0.5          # Seconds between API calls
+BRONZE_TOKEN_BATCH_LIMIT = 100      # Max tokens per run
+API_PAGINATION_LIMIT = 100          # Records per API call
+
+# Bronze Layer Filters (9 parameters)  
+TOKEN_LIMIT = 100                   # Total tokens to fetch
+MIN_LIQUIDITY = 200000              # Minimum token liquidity
+MAX_WHALES_PER_TOKEN = 20           # Top N holders per token
+
+# Silver Layer Filters (8 parameters)
+TRACKED_TOKEN_LIMIT = 50            # Max tokens to track
+SILVER_MIN_LIQUIDITY = 1000         # Minimum liquidity filter
+PNL_TIMEFRAMES = ['all', 'week', 'month', 'quarter']
+
+# Gold Layer Thresholds (13 parameters)
+MIN_TOTAL_PNL = 0.01               # Minimum profit threshold
+ELITE_MIN_PNL = 1000               # Elite tier requirement
+STRONG_MIN_PNL = 100               # Strong tier requirement
+
+# Helius Integration (6 parameters)
+HELIUS_MAX_ADDRESSES = 100         # Max addresses per webhook
+HELIUS_TRANSACTION_TYPES = ["SWAP", "TRANSFER"]
+
+# Infrastructure (12 parameters)
+MINIO_ENDPOINT = 'http://minio:9000'
+SPARK_DRIVER_MEMORY = '2g'
+```
+
+#### Configuration Benefits
+- ✅ **Single source of truth**: All parameters in one file
+- ✅ **Easy tuning**: Change filters and thresholds quickly
+- ✅ **Environment support**: Environment variable integration ready
+- ✅ **Type safety**: Clear parameter definitions and documentation
+- ✅ **Production ready**: No hardcoded values in task modules
+
+#### Key Tunable Parameters
+| Category | Parameter | Purpose | Production Adjustment |
+|----------|-----------|---------|----------------------|
+| **Performance** | `TOKEN_LIMIT` | Total tokens to process | Increase to 200+ |
+| **Quality** | `ELITE_MIN_PNL` | Elite trader threshold | Adjust based on market |
+| **Scaling** | `BRONZE_WHALE_BATCH_LIMIT` | Processing batch size | Increase for speed |
+| **Memory** | `SPARK_DRIVER_MEMORY` | PySpark memory allocation | Scale with data volume |
+
 ## Business Value
 
 ### Smart Money Identification

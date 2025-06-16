@@ -92,6 +92,33 @@ The project uses the official Apache Airflow Docker setup with the following ser
    - Production: Create a custom Dockerfile and uncomment the `build: .` line in docker-compose.yaml
 4. Configuration changes can be made in `config/airflow.cfg`
 
+## 🔧 Pipeline Configuration
+
+### Centralized Configuration System
+All Smart Trader pipeline settings are centralized in `dags/config/smart_trader_config.py`:
+
+```bash
+# View all configuration parameters
+cat dags/config/smart_trader_config.py
+
+# Test configuration import
+cd dags && python3 -c "from config.smart_trader_config import TOKEN_LIMIT; print(f'Token Limit: {TOKEN_LIMIT}')"
+```
+
+### Key Configuration Categories:
+- **API Limits**: Rate delays, batch sizes, pagination
+- **Bronze Filters**: Token criteria, whale thresholds, transaction limits
+- **Silver Transformation**: PnL timeframes, quality filters
+- **Gold Analytics**: Performance tiers, profitability thresholds
+- **Helius Integration**: Webhook settings, address limits
+- **Infrastructure**: MinIO, PySpark, storage paths
+
+### Configuration Benefits:
+- ✅ **67 tunable parameters** in single file
+- ✅ **Environment variable support** for deployments
+- ✅ **No hardcoded values** in task modules
+- ✅ **Easy production tuning** for different scales
+
 ## Additional Services
 
 ### Webhook Listener

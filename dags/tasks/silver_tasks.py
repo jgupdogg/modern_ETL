@@ -17,24 +17,23 @@ import pyarrow.parquet as pq
 import boto3
 from botocore.client import Config
 
-
-# Configuration
-class FilterConfig:
-    """Configuration for token filtering criteria"""
-    limit: int = 50
-    min_liquidity: float = 1000      # Reduced from 10000
-    min_volume: float = 1000         # Reduced from 50000
-    min_volume_mcap_ratio: float = 0.001  # Reduced from 0.05
-    min_price_change: float = 1      # Reduced from 30
+# Import centralized configuration
+from config.smart_trader_config import (
+    TRACKED_TOKEN_LIMIT, SILVER_MIN_LIQUIDITY, SILVER_MIN_VOLUME,
+    SILVER_MIN_VOLUME_MCAP_RATIO, SILVER_MIN_PRICE_CHANGE,
+    SILVER_PNL_BATCH_LIMIT, PNL_TIMEFRAMES, PNL_WEEK_DAYS, PNL_MONTH_DAYS, PNL_QUARTER_DAYS,
+    SOL_TOKEN_ADDRESS, MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, MINIO_BUCKET,
+    SILVER_TRACKED_TOKENS_PATH, SILVER_WALLET_PNL_PATH
+)
 
 
 def get_minio_client() -> boto3.client:
     """Create MinIO S3 client"""
     return boto3.client(
         's3',
-        endpoint_url='http://minio:9000',
-        aws_access_key_id='minioadmin',
-        aws_secret_access_key='minioadmin123',
+        endpoint_url=MINIO_ENDPOINT,
+        aws_access_key_id=MINIO_ACCESS_KEY,
+        aws_secret_access_key=MINIO_SECRET_KEY,
         config=Config(signature_version='s3v4')
     )
 
@@ -81,8 +80,7 @@ def transform_silver_tracked_tokens(**context):
     """
     logger = logging.getLogger(__name__)
     
-    # Get configuration
-    config = FilterConfig()
+    # Configuration now uses centralized config
     
     try:
         # Step 1: Query bronze data using DuckDB container
@@ -146,9 +144,9 @@ def transform_silver_tracked_tokens(**context):
             # Apply lenient filters for testing
             mask = (
                 (df['token_address'].notna()) &
-                (df['liquidity'] >= config.min_liquidity)
+                (df['liquidity'] >= SILVER_MIN_LIQUIDITY)
             )
-            logger.info(f"Applied lenient filters: address + liquidity >= {config.min_liquidity}")
+            logger.info(f"Applied lenient filters: address + liquidity >= {SILVER_MIN_LIQUIDITY}")
             
             filtered_df = df[mask].copy()
             
@@ -163,12 +161,12 @@ def transform_silver_tracked_tokens(**context):
             ratio_mask = (
                 filtered_df['market_cap'].isna() | 
                 (filtered_df['market_cap'] <= 0) |
-                (filtered_df['volume_mcap_ratio'] >= config.min_volume_mcap_ratio)
+                (filtered_df['volume_mcap_ratio'] >= SILVER_MIN_VOLUME_MCAP_RATIO)
             )
             filtered_df = filtered_df[ratio_mask]
             
             # Sort and limit
-            filtered_df = filtered_df.sort_values('liquidity', ascending=False).head(config.limit)
+            filtered_df = filtered_df.sort_values('liquidity', ascending=False).head(TRACKED_TOKEN_LIMIT)
             
             # Rename columns to match silver schema
             filtered_df = filtered_df.rename(columns={
@@ -278,12 +276,8 @@ except ImportError:
     PYSPARK_AVAILABLE = False
 
 
-# Configuration for PnL calculation
-class PnLConfig:
-    """Configuration for PnL calculation"""
-    batch_limit: int = 1000  # Max wallets per batch
-    timeframes = ['all', 'week', 'month', 'quarter']
-    sol_address = "So11111111111111111111111111111111111111112"
+# Configuration classes replaced by centralized config
+# (PnLConfig now uses imported constants from config.smart_trader_config)
 
 
 def get_silver_pnl_schema() -> StructType:
@@ -406,9 +400,8 @@ def transform_silver_wallet_pnl(**context):
         
         # Calculate PnL for all timeframes
         all_timeframe_results = []
-        config = PnLConfig()
         
-        for timeframe in config.timeframes:
+        for timeframe in PNL_TIMEFRAMES:
             logger.info(f"Calculating PnL for timeframe: {timeframe}")
             timeframe_pnl = calculate_timeframe_pnl(spark, transactions_df, timeframe)
             all_timeframe_results.append(timeframe_pnl)
@@ -701,9 +694,9 @@ if PYSPARK_AVAILABLE:
         current_time = datetime.now(timezone.utc)
         time_filters = {
             'all': None,
-            'week': current_time - timedelta(days=7),
-            'month': current_time - timedelta(days=30),
-            'quarter': current_time - timedelta(days=90)
+            'week': current_time - timedelta(days=PNL_WEEK_DAYS),
+            'month': current_time - timedelta(days=PNL_MONTH_DAYS),
+            'quarter': current_time - timedelta(days=PNL_QUARTER_DAYS)
         }
         
         start_time = time_filters.get(timeframe.lower())

@@ -17,25 +17,24 @@ import pyarrow.parquet as pq
 import boto3
 from botocore.client import Config
 
-
-# Configuration
-class GoldConfig:
-    """Configuration for gold layer top traders selection"""
-    min_total_pnl: float = 0.01            # Min profitable threshold ($0.01+)
-    min_roi: float = 1.0                   # Min 1% ROI for profitability
-    min_win_rate: float = 40.0             # Min 40% win rate 
-    min_trade_count: int = 3               # Min 3 trades for significance
-    max_traders_per_batch: int = 100       # Top N traders per batch
-    performance_lookback_days: int = 30    # Consider last 30 days for tier calculation
+# Import centralized configuration
+from config.smart_trader_config import (
+    MIN_TOTAL_PNL, MIN_ROI_PERCENT, MIN_WIN_RATE_PERCENT, MIN_TRADE_COUNT,
+    GOLD_MAX_TRADERS_PER_BATCH, PERFORMANCE_LOOKBACK_DAYS,
+    ELITE_MIN_PNL, ELITE_MIN_ROI, ELITE_MIN_WIN_RATE, ELITE_MIN_TRADES,
+    STRONG_MIN_PNL, STRONG_MIN_ROI, STRONG_MIN_WIN_RATE, STRONG_MIN_TRADES,
+    MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, MINIO_BUCKET,
+    GOLD_TOP_TRADERS_PATH, SILVER_WALLET_PNL_PATH
+)
 
 
 def get_minio_client() -> boto3.client:
     """Create MinIO S3 client"""
     return boto3.client(
         's3',
-        endpoint_url='http://minio:9000',
-        aws_access_key_id='minioadmin',
-        aws_secret_access_key='minioadmin123',
+        endpoint_url=MINIO_ENDPOINT,
+        aws_access_key_id=MINIO_ACCESS_KEY,
+        aws_secret_access_key=MINIO_SECRET_KEY,
         config=Config(signature_version='s3v4')
     )
 
@@ -257,14 +256,13 @@ if PYSPARK_AVAILABLE:
     def select_top_performers(spark: SparkSession, silver_df: DataFrame) -> DataFrame:
         """Select top performing wallets based on criteria"""
         logger = logging.getLogger(__name__)
-        config = GoldConfig()
         
-        # Apply performance filters for profitable wallets only
+        # Apply performance filters for profitable wallets only using centralized config
         filtered_performers = silver_df.filter(
-            (col("total_pnl") >= config.min_total_pnl) &  # Must be profitable
-            (col("roi") >= config.min_roi) &
-            (col("win_rate") >= config.min_win_rate) &
-            (col("trade_count") >= config.min_trade_count) &
+            (col("total_pnl") >= MIN_TOTAL_PNL) &  # Must be profitable
+            (col("roi") >= MIN_ROI_PERCENT) &
+            (col("win_rate") >= MIN_WIN_RATE_PERCENT) &
+            (col("trade_count") >= MIN_TRADE_COUNT) &
             (col("total_pnl") > 0)  # Explicitly profitable only
         )
         
@@ -323,19 +321,19 @@ if PYSPARK_AVAILABLE:
             ).otherwise(0.0).alias("profit_factor")
         )
         
-        # Add performance tier using UDF-like logic (very relaxed thresholds for testing)
+        # Add performance tier using centralized config thresholds
         tiered_performers = enhanced_performers.withColumn(
             "performance_tier",
             when(
-                (col("total_pnl") >= 1000) & 
-                (col("roi") >= 30) & 
-                (col("win_rate") >= 60) & 
-                (col("trade_count") >= 10), "elite"
+                (col("total_pnl") >= ELITE_MIN_PNL) & 
+                (col("roi") >= ELITE_MIN_ROI) & 
+                (col("win_rate") >= ELITE_MIN_WIN_RATE) & 
+                (col("trade_count") >= ELITE_MIN_TRADES), "elite"
             ).when(
-                (col("total_pnl") >= 100) & 
-                (col("roi") >= 15) & 
-                (col("win_rate") >= 40) & 
-                (col("trade_count") >= 5), "strong"
+                (col("total_pnl") >= STRONG_MIN_PNL) & 
+                (col("roi") >= STRONG_MIN_ROI) & 
+                (col("win_rate") >= STRONG_MIN_WIN_RATE) & 
+                (col("trade_count") >= STRONG_MIN_TRADES), "strong"
             ).otherwise("promising")
         )
         
@@ -345,7 +343,7 @@ if PYSPARK_AVAILABLE:
             "trader_rank", 
             row_number().over(window_spec)
         ).filter(
-            col("trader_rank") <= config.max_traders_per_batch
+            col("trader_rank") <= GOLD_MAX_TRADERS_PER_BATCH
         )
         
         # Add gold processing metadata

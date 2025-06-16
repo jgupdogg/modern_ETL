@@ -84,7 +84,13 @@ docker-compose down         # Stop services
 ├── config/                      # Airflow configuration
 ├── dags/                       # Airflow DAGs
 │   ├── smart_trader_identification_dag.py  # Main smart trader pipeline
+│   ├── config/                  # 🆕 Centralized configuration
+│   │   └── smart_trader_config.py  # 67 configurable parameters
 │   ├── tasks/                   # Modular task implementations
+│   │   ├── bronze_tasks.py      # Data ingestion (BirdEye API)
+│   │   ├── silver_tasks.py      # Data transformation (PySpark)
+│   │   ├── gold_tasks.py        # Analytics (Top trader selection)
+│   │   └── helius_tasks.py      # Integration (Webhook management)
 │   └── birdeye_client/         # BirdEye API client library
 ├── dbt/                        # DBT transformations (webhook pipeline)
 ├── data/                       # Local data storage and checkpoints
@@ -93,6 +99,15 @@ docker-compose down         # Stop services
 │   └── webhook-listener/       # FastAPI webhook ingestion service
 └── docker-compose.yaml        # Container orchestration
 ```
+
+### 🔧 Configuration Architecture
+
+The project uses a **centralized configuration system** with:
+- **67 configurable parameters** across all pipeline layers
+- **Single source of truth** in `dags/config/smart_trader_config.py`
+- **Environment variable support** for deployment flexibility
+- **Layer-organized settings**: Bronze, Silver, Gold, Helius, Infrastructure
+- **Production-ready tuning**: Easy parameter adjustment for different environments
 
 ## 🚧 Project Status
 

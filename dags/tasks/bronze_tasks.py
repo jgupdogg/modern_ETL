@@ -21,16 +21,16 @@ from botocore.client import Config
 # Import the birdeye client from local dags directory
 from birdeye_client import BirdEyeAPIClient, TokenListSchema
 
-
-# Configuration
-class TokenListConfig:
-    """Configuration for token list fetching"""
-    limit: int = 100
-    min_liquidity: int = 200000
-    max_liquidity: int = 1000000
-    min_volume_1h_usd: int = 200000
-    min_price_change_2h_percent: int = 10
-    min_price_change_24h_percent: int = 30
+# Import centralized configuration
+from config.smart_trader_config import (
+    TOKEN_LIMIT, MIN_LIQUIDITY, MAX_LIQUIDITY, MIN_VOLUME_1H_USD,
+    MIN_PRICE_CHANGE_2H_PERCENT, MIN_PRICE_CHANGE_24H_PERCENT,
+    MAX_WHALES_PER_TOKEN, BRONZE_WHALE_BATCH_LIMIT, WHALE_REFRESH_DAYS,
+    BRONZE_WALLET_BATCH_LIMIT, MAX_TRANSACTIONS_PER_WALLET,
+    API_RATE_LIMIT_DELAY, WALLET_API_DELAY, API_PAGINATION_LIMIT,
+    MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, MINIO_BUCKET,
+    BRONZE_TOKEN_LIST_PATH, BRONZE_TOKEN_WHALES_PATH, BRONZE_WALLET_TRANSACTIONS_PATH
+)
 
 
 def get_token_schema() -> pa.Schema:
@@ -42,9 +42,9 @@ def get_minio_client() -> boto3.client:
     """Create MinIO S3 client"""
     return boto3.client(
         's3',
-        endpoint_url='http://minio:9000',
-        aws_access_key_id='minioadmin',
-        aws_secret_access_key='minioadmin123',
+        endpoint_url=MINIO_ENDPOINT,
+        aws_access_key_id=MINIO_ACCESS_KEY,
+        aws_secret_access_key=MINIO_SECRET_KEY,
         config=Config(signature_version='s3v4')
     )
 
@@ -56,9 +56,6 @@ def fetch_bronze_token_list(**context):
     Extracted from bronze_layer_ingestion_dag.py
     """
     logger = logging.getLogger(__name__)
-    
-    # Get configuration
-    config = TokenListConfig()
     
     # Try to get API key from Airflow Variable first, then environment
     from airflow.models import Variable
@@ -77,27 +74,27 @@ def fetch_bronze_token_list(**context):
     birdeye_client = BirdEyeAPIClient(api_key)
     s3_client = get_minio_client()
     
-    # Prepare parameters
+    # Prepare parameters using centralized config
     filter_params = {
-        "min_liquidity": config.min_liquidity,
-        "max_liquidity": config.max_liquidity,
-        "min_volume_1h_usd": config.min_volume_1h_usd,
-        "min_price_change_2h_percent": config.min_price_change_2h_percent,
-        "min_price_change_24h_percent": config.min_price_change_24h_percent
+        "min_liquidity": MIN_LIQUIDITY,
+        "max_liquidity": MAX_LIQUIDITY,
+        "min_volume_1h_usd": MIN_VOLUME_1H_USD,
+        "min_price_change_2h_percent": MIN_PRICE_CHANGE_2H_PERCENT,
+        "min_price_change_24h_percent": MIN_PRICE_CHANGE_24H_PERCENT
     }
     
     logger.info(f"Fetching tokens with filters: {filter_params}")
     
-    # Pagination variables
+    # Pagination variables using centralized config
     offset = 0
-    limit_per_call = 100
+    limit_per_call = API_PAGINATION_LIMIT
     all_tokens = []
     has_more = True
-    sleep_between_calls = 0.5
+    sleep_between_calls = API_RATE_LIMIT_DELAY
     
     # Fetch tokens with pagination
-    while has_more and len(all_tokens) < config.limit:
-        remaining = config.limit - len(all_tokens)
+    while has_more and len(all_tokens) < TOKEN_LIMIT:
+        remaining = TOKEN_LIMIT - len(all_tokens)
         current_limit = min(limit_per_call, remaining)
         
         logger.info(f"API call: offset={offset}, limit={current_limit}")
@@ -128,7 +125,7 @@ def fetch_bronze_token_list(**context):
                 has_more = False
             
             # Rate limiting
-            if has_more and len(all_tokens) < config.limit:
+            if has_more and len(all_tokens) < TOKEN_LIMIT:
                 time.sleep(sleep_between_calls)
                 
         except Exception as e:
@@ -138,7 +135,7 @@ def fetch_bronze_token_list(**context):
     logger.info(f"Fetched {len(all_tokens)} tokens")
     
     # Ensure we don't exceed limit
-    all_tokens = all_tokens[:config.limit]
+    all_tokens = all_tokens[:TOKEN_LIMIT]
     
     # Convert normalized tokens to DataFrame
     df = pd.DataFrame(all_tokens)
@@ -210,13 +207,8 @@ def fetch_bronze_token_list(**context):
     }
 
 
-# Configuration for whale data fetching
-class WhaleConfig:
-    """Configuration for whale data fetching"""
-    max_whales_per_token: int = 20  # Top N holders to fetch
-    batch_limit: int = 50  # Tokens per DAG run
-    refresh_days: int = 7  # Re-fetch if older than N days
-    rate_limit_delay: float = 0.5  # Seconds between API calls
+# Configuration classes replaced by centralized config
+# (WhaleConfig now uses imported constants from config.smart_trader_config)
 
 
 def get_whale_schema() -> pa.Schema:
@@ -309,9 +301,6 @@ def fetch_bronze_token_whales(**context):
     """
     logger = logging.getLogger(__name__)
     
-    # Get configuration
-    config = WhaleConfig()
-    
     # Try to get API key from Airflow Variable first, then environment
     from airflow.models import Variable
     try:
@@ -329,10 +318,10 @@ def fetch_bronze_token_whales(**context):
     birdeye_client = BirdEyeAPIClient(api_key)
     s3_client = get_minio_client()
     
-    # Get tokens needing whale data
+    # Get tokens needing whale data using centralized config
     try:
         logger.info(f"Querying for tokens needing whale data...")
-        tokens_df = query_tracked_tokens_for_whales(config.batch_limit, config.refresh_days)
+        tokens_df = query_tracked_tokens_for_whales(BRONZE_WHALE_BATCH_LIMIT, WHALE_REFRESH_DAYS)
         
         logger.info(f"Found {len(tokens_df)} tokens needing whale data")
         
@@ -367,7 +356,7 @@ def fetch_bronze_token_whales(**context):
             response = birdeye_client.get_token_top_holders(
                 token_address=token_address,
                 offset=0,
-                limit=config.max_whales_per_token
+                limit=MAX_WHALES_PER_TOKEN
             )
             
             # Parse response
@@ -415,7 +404,7 @@ def fetch_bronze_token_whales(**context):
         
         # Rate limiting
         if _ < len(tokens_df) - 1:  # Don't sleep after last token
-            time.sleep(config.rate_limit_delay)
+            time.sleep(API_RATE_LIMIT_DELAY)
     
     # Convert to DataFrame and save to MinIO
     if all_whale_data:
@@ -476,12 +465,8 @@ def fetch_bronze_token_whales(**context):
     }
 
 
-# Configuration for wallet transaction fetching
-class TransactionConfig:
-    """Configuration for wallet transaction fetching"""
-    batch_limit: int = 20  # Wallets per DAG run
-    max_txns_per_wallet: int = 100  # Transaction history depth
-    rate_limit_delay: float = 1.0  # Seconds between wallet API calls
+# Configuration classes replaced by centralized config
+# (TransactionConfig now uses imported constants from config.smart_trader_config)
 
 
 def get_transaction_schema() -> pa.Schema:
@@ -707,8 +692,7 @@ def fetch_bronze_wallet_transactions(**context):
     """
     logger = logging.getLogger(__name__)
     
-    # Get configuration
-    config = TransactionConfig()
+    # Configuration now uses centralized config
     
     # Try to get API key from Airflow Variable first, then environment
     from airflow.models import Variable
@@ -729,7 +713,7 @@ def fetch_bronze_wallet_transactions(**context):
     
     # Get unfetched whale wallets
     logger.info(f"Reading unfetched whale wallets...")
-    whales_df = read_unfetched_whales(config.batch_limit)
+    whales_df = read_unfetched_whales(BRONZE_WALLET_BATCH_LIMIT)
     
     if whales_df.empty:
         logger.info("No unfetched whale wallets found")
@@ -759,7 +743,7 @@ def fetch_bronze_wallet_transactions(**context):
             # Fetch wallet transactions from BirdEye API
             response = birdeye_client.get_wallet_transactions(
                 wallet_address=wallet_address,
-                limit=config.max_txns_per_wallet
+                limit=MAX_TRANSACTIONS_PER_WALLET
             )
             
             # Parse response
@@ -803,7 +787,7 @@ def fetch_bronze_wallet_transactions(**context):
                     'basePrice': 0.025,
                     'quotePrice': 40.0
                 }
-                for i in range(min(3, config.max_txns_per_wallet))  # Mock 3 transactions per wallet
+                for i in range(min(3, MAX_TRANSACTIONS_PER_WALLET))  # Mock 3 transactions per wallet
             ]
         
         # Transform trades to our schema
@@ -818,7 +802,7 @@ def fetch_bronze_wallet_transactions(**context):
         
         # Rate limiting
         if _ < len(whales_df) - 1:  # Don't sleep after last wallet
-            time.sleep(config.rate_limit_delay)
+            time.sleep(WALLET_API_DELAY)
     
     # Convert to DataFrame and save to MinIO
     if all_transactions:

@@ -18,24 +18,22 @@ from botocore.client import Config
 import requests
 from airflow.models import Variable
 
-
-# Configuration
-class HeliusConfig:
-    """Configuration for Helius webhook updates"""
-    api_base_url: str = "https://api.helius.xyz/v0"
-    max_addresses_per_webhook: int = 100  # Helius limit
-    webhook_type: str = "enhanced"
-    transaction_types: List[str] = ["SWAP", "TRANSFER"]
-    performance_tier_priority: List[str] = ["elite", "strong", "promising"]
+# Import centralized configuration
+from config.smart_trader_config import (
+    HELIUS_API_BASE_URL, HELIUS_MAX_ADDRESSES, HELIUS_WEBHOOK_TYPE,
+    HELIUS_TRANSACTION_TYPES, HELIUS_TIER_PRIORITY, HELIUS_REQUEST_TIMEOUT,
+    MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, MINIO_BUCKET,
+    GOLD_TOP_TRADERS_PATH
+)
 
 
 def get_minio_client() -> boto3.client:
     """Create MinIO S3 client"""
     return boto3.client(
         's3',
-        endpoint_url='http://minio:9000',
-        aws_access_key_id='minioadmin',
-        aws_secret_access_key='minioadmin123',
+        endpoint_url=MINIO_ENDPOINT,
+        aws_access_key_id=MINIO_ACCESS_KEY,
+        aws_secret_access_key=MINIO_SECRET_KEY,
         config=Config(signature_version='s3v4')
     )
 
@@ -103,7 +101,7 @@ def read_latest_gold_traders() -> List[Dict[str, Any]]:
                 continue
         
         # Sort by performance tier and rank
-        tier_order = {tier: i for i, tier in enumerate(HeliusConfig.performance_tier_priority)}
+        tier_order = {tier: i for i, tier in enumerate(HELIUS_TIER_PRIORITY)}
         all_traders.sort(
             key=lambda x: (
                 tier_order.get(x.get('performance_tier', 'promising'), 999),
@@ -134,12 +132,12 @@ def get_helius_api_key() -> str:
 def get_current_webhook(api_key: str) -> Optional[Dict[str, Any]]:
     """Get current webhook configuration from Helius"""
     logger = logging.getLogger(__name__)
-    config = HeliusConfig()
+    
     
     try:
         headers = {"Content-Type": "application/json"}
         response = requests.get(
-            f"{config.api_base_url}/webhooks?api-key={api_key}",
+            f"{HELIUS_API_BASE_URL}/webhooks?api-key={api_key}",
             headers=headers,
             timeout=30
         )
@@ -163,19 +161,19 @@ def get_current_webhook(api_key: str) -> Optional[Dict[str, Any]]:
 def create_webhook(api_key: str, webhook_url: str, addresses: List[str]) -> Optional[str]:
     """Create a new webhook in Helius"""
     logger = logging.getLogger(__name__)
-    config = HeliusConfig()
+    
     
     try:
         headers = {"Content-Type": "application/json"}
         payload = {
             "webhookURL": webhook_url,
-            "transactionTypes": config.transaction_types,
+            "transactionTypes": HELIUS_TRANSACTION_TYPES,
             "accountAddresses": addresses,
-            "webhookType": config.webhook_type
+            "webhookType": HELIUS_WEBHOOK_TYPE
         }
         
         response = requests.post(
-            f"{config.api_base_url}/webhooks?api-key={api_key}",
+            f"{HELIUS_API_BASE_URL}/webhooks?api-key={api_key}",
             headers=headers,
             json=payload,
             timeout=30
@@ -195,19 +193,19 @@ def create_webhook(api_key: str, webhook_url: str, addresses: List[str]) -> Opti
 def update_webhook(api_key: str, webhook_id: str, webhook_url: str, addresses: List[str]) -> bool:
     """Update existing webhook with new addresses"""
     logger = logging.getLogger(__name__)
-    config = HeliusConfig()
+    
     
     try:
         headers = {"Content-Type": "application/json"}
         payload = {
             "webhookURL": webhook_url,
-            "transactionTypes": config.transaction_types,
+            "transactionTypes": HELIUS_TRANSACTION_TYPES,
             "accountAddresses": addresses,
-            "webhookType": config.webhook_type
+            "webhookType": HELIUS_WEBHOOK_TYPE
         }
         
         response = requests.put(
-            f"{config.api_base_url}/webhooks/{webhook_id}?api-key={api_key}",
+            f"{HELIUS_API_BASE_URL}/webhooks/{webhook_id}?api-key={api_key}",
             headers=headers,
             json=payload,
             timeout=30
@@ -251,10 +249,10 @@ def update_helius_webhook(**context):
         ))
         
         # Limit to max addresses per webhook
-        config = HeliusConfig()
-        if len(wallet_addresses) > config.max_addresses_per_webhook:
-            logger.info(f"Limiting addresses from {len(wallet_addresses)} to {config.max_addresses_per_webhook}")
-            wallet_addresses = wallet_addresses[:config.max_addresses_per_webhook]
+        
+        if len(wallet_addresses) > HELIUS_MAX_ADDRESSES:
+            logger.info(f"Limiting addresses from {len(wallet_addresses)} to {HELIUS_MAX_ADDRESSES}")
+            wallet_addresses = wallet_addresses[:HELIUS_MAX_ADDRESSES]
         
         logger.info(f"Found {len(wallet_addresses)} unique wallet addresses to monitor")
         

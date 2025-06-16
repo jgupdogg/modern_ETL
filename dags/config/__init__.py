@@ -1,0 +1,1 @@
+# Config package for Smart Trader Pipeline
