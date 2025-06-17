@@ -7,6 +7,7 @@ Transforms bronze webhook data to silver layer swap transactions using PySpark.
 import os
 import json
 import logging
+import sys
 from datetime import datetime, timedelta
 from typing import Dict, Any, List
 
@@ -14,9 +15,17 @@ from airflow import DAG
 from airflow.decorators import task
 from airflow.utils.dates import days_ago
 
+# Import centralized webhook configuration
+sys.path.append('/opt/airflow/dags')
+from config.webhook_config import (
+    MINIO_BUCKET, BRONZE_WEBHOOKS_PATH, SILVER_SWAP_TRANSACTIONS_PATH,
+    SILVER_BATCH_SIZE_LIMIT, SILVER_PROCESSING_WINDOW_MINUTES,
+    get_spark_config, get_s3_path, get_processing_status_fields
+)
+
 # DAG Configuration
 DAG_ID = "silver_webhook_transformation"
-SCHEDULE_INTERVAL = "*/10 * * * *"  # Every 10 minutes
+SCHEDULE_INTERVAL = f"*/{SILVER_PROCESSING_WINDOW_MINUTES} * * * *"  # From centralized config
 
 # Default arguments
 default_args = {
@@ -66,31 +75,25 @@ def silver_webhook_swap_transformation(**context) -> Dict[str, Any]:
     execution_date = context['logical_date']
     batch_id = execution_date.strftime("%Y%m%d_%H%M%S")
     
-    # Create Spark session with optimized memory settings
+    # Create Spark session with centralized configuration
+    spark_config = get_spark_config('silver')
     spark = SparkSession.builder \
-        .appName(f"SilverWebhookTransformation_{batch_id}") \
-        .config("spark.jars.packages", "org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.367") \
-        .config("spark.hadoop.fs.s3a.endpoint", "http://minio:9000") \
-        .config("spark.hadoop.fs.s3a.access.key", "minioadmin") \
-        .config("spark.hadoop.fs.s3a.secret.key", "minioadmin123") \
-        .config("spark.hadoop.fs.s3a.path.style.access", "true") \
-        .config("spark.hadoop.fs.s3a.connection.ssl.enabled", "false") \
-        .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem") \
-        .config("spark.sql.adaptive.enabled", "true") \
-        .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
-        .config("spark.driver.memory", "2g") \
-        .config("spark.executor.memory", "2g") \
-        .config("spark.driver.maxResultSize", "1g") \
-        .config("spark.sql.execution.arrow.pyspark.enabled", "false") \
-        .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer") \
-        .getOrCreate()
+        .appName(f"SilverWebhookTransformation_{batch_id}")
+    
+    # Apply all spark configurations
+    for key, value in spark_config.items():
+        spark = spark.config(key, value)
+    
+    # Disable arrow for JSON processing compatibility
+    spark = spark.config("spark.sql.execution.arrow.pyspark.enabled", "false")
+    spark = spark.getOrCreate()
     
     spark.sparkContext.setLogLevel("WARN")
     
     try:
-        # Read bronze webhook data
+        # Read bronze webhook data using centralized path
         try:
-            bronze_path = "s3a://webhook-data/bronze/webhooks/"
+            bronze_path = get_s3_path(BRONZE_WEBHOOKS_PATH)
             bronze_df = spark.read.parquet(bronze_path)
             logger.info(f"Successfully read bronze data from {bronze_path}")
             
@@ -119,7 +122,7 @@ def silver_webhook_swap_transformation(**context) -> Dict[str, Any]:
                 }
             
             # Process in smaller batches to avoid memory issues
-            batch_size = 10000  # Process 10K records at a time
+            batch_size = SILVER_BATCH_SIZE_LIMIT  # Use centralized config
             if unprocessed_count > batch_size:
                 logger.info(f"Large dataset detected ({unprocessed_count} records). Processing first {batch_size} records.")
                 clean_df = clean_df.limit(batch_size)
@@ -208,6 +211,11 @@ def silver_webhook_swap_transformation(**context) -> Dict[str, Any]:
                 lit(False).alias("processed"),
                 lit(False).alias("notification_sent"),
                 
+                # Medallion architecture gold processing status
+                lit(False).alias("processed_for_gold"),
+                lit(None).alias("gold_processed_at"),
+                lit(None).alias("gold_batch_id"),
+                
                 # Processing metadata
                 current_timestamp().alias("processed_at"),
                 lit(batch_id).alias("batch_id"),
@@ -232,8 +240,8 @@ def silver_webhook_swap_transformation(**context) -> Dict[str, Any]:
                     "status": "no_valid_swaps"
                 }
             
-            # Write to silver layer with partitioning
-            output_path = "s3a://webhook-data/silver/webhooks/swap_transactions/"
+            # Write to silver layer using centralized path
+            output_path = get_s3_path(SILVER_SWAP_TRANSACTIONS_PATH)
             
             silver_df.write \
                 .partitionBy("processing_date", "source") \
@@ -275,8 +283,8 @@ def silver_webhook_swap_transformation(**context) -> Dict[str, Any]:
                 )
             ).drop("was_processed")
             
-            # Write updated bronze data back to bronze layer
-            bronze_updated_path = "s3a://webhook-data/bronze/webhooks/"
+            # Write updated bronze data back to bronze layer using centralized path
+            bronze_updated_path = get_s3_path(BRONZE_WEBHOOKS_PATH)
             bronze_updated.write.mode("overwrite").partitionBy("processing_date").parquet(bronze_updated_path)
             logger.info(f"Updated bronze processing status for {final_count} records")
             
