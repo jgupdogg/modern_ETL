@@ -45,6 +45,50 @@ models:
         description: "Whether this token was newly tracked in current run"
         tests:
           - not_null
+
+  - name: smart_wallets
+    description: "Gold layer smart wallets filtered from bots with positive PnL performance"
+    columns:
+      - name: wallet_address
+        description: "Unique wallet address identifier"
+        tests:
+          - not_null
+      - name: time_period
+        description: "PnL analysis timeframe"
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['7day', '30day', '60day']
+      - name: trade_frequency_daily
+        description: "Average trades per day (all-time)"
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "< 100"  # Should be less than 100 due to bot filter
+      - name: trade_count
+        description: "Total number of trades (all-time)"
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "> 0"
+      - name: smart_trader_score
+        description: "Calculated smart trader score (0-1)"
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0 AND smart_trader_score <= 1"
+      - name: trader_classification
+        description: "Trader classification category"
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['elite_trader', 'profitable_trader', 'consistent_trader', 'emerging_trader']
+      - name: gold_processing_status
+        description: "Gold layer processing status"
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['smart_wallet_filtered']
       
       - name: has_valid_json
         description: "Whether payload is valid JSON"
@@ -207,3 +251,4 @@ models:
         description: "Whether this token was newly tracked in current run"
         tests:
           - not_null
+

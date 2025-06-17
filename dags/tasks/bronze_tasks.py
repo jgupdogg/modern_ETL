@@ -581,63 +581,84 @@ def read_unfetched_whales(batch_limit: int) -> pd.DataFrame:
 
 def transform_trade(trade: Dict[str, Any], wallet_address: str, token_address: str, 
                    fetched_at: pd.Timestamp) -> Optional[Dict[str, Any]]:
-    """Transform raw API trade data to our schema"""
-    tx_hash = trade.get('txHash', trade.get('tx_hash', ''))
+    """Transform raw API trade data from new /trader/txs/seek_by_time endpoint to our schema"""
+    tx_hash = trade.get('tx_hash', '')
     if not tx_hash:
         return None
     
-    # Get base and quote token info
+    # Validate that this transaction belongs to our target wallet
+    if trade.get('owner') != wallet_address:
+        return None
+    
+    # Get base and quote token info from new API schema
     base = trade.get('base', {})
     quote = trade.get('quote', {})
     
-    # Determine which is "from" and "to" based on type
-    if trade.get('type') == 'buy':
-        from_token = quote  # Buying with quote token
-        to_token = base     # Receiving base token
-        transaction_type = 'BUY' if token_address == base.get('address') else 'SELL'
-    elif trade.get('type') == 'sell':
-        from_token = base   # Selling base token
-        to_token = quote    # Receiving quote token
-        transaction_type = 'SELL' if token_address == base.get('address') else 'BUY'
+    # Determine transaction direction using type_swap fields
+    # type_swap: "from" means outgoing, "to" means incoming
+    base_type_swap = base.get('type_swap', '')
+    quote_type_swap = quote.get('type_swap', '')
+    
+    # Determine from/to tokens based on type_swap
+    if base_type_swap == 'from' and quote_type_swap == 'to':
+        # Swapping base token for quote token (base -> quote)
+        from_token = base
+        to_token = quote
+    elif base_type_swap == 'to' and quote_type_swap == 'from':
+        # Swapping quote token for base token (quote -> base)
+        from_token = quote
+        to_token = base
     else:
-        # For swaps, check typeSwap field
-        if base.get('typeSwap') == 'from' and quote.get('typeSwap') == 'to':
-            from_token, to_token = base, quote
-        elif base.get('typeSwap') == 'to' and quote.get('typeSwap') == 'from':
-            from_token, to_token = quote, base
-        else:
-            from_token, to_token = base, quote
+        # Fallback: use change_amount signs to determine direction
+        base_change = base.get('change_amount', 0)
+        quote_change = quote.get('change_amount', 0)
         
-        # Determine transaction type relative to our token
-        if token_address == to_token.get('address'):
-            transaction_type = 'BUY'
-        elif token_address == from_token.get('address'):
-            transaction_type = 'SELL'
+        if base_change < 0 and quote_change > 0:
+            # Base decreased, quote increased (base -> quote)
+            from_token = base
+            to_token = quote
+        elif base_change > 0 and quote_change < 0:
+            # Base increased, quote decreased (quote -> base)
+            from_token = quote
+            to_token = base
         else:
-            transaction_type = 'UNKNOWN'
+            # Can't determine direction, skip this transaction
+            return None
     
-    # Calculate value in USD
+    # Determine transaction type relative to our target token
+    if token_address == to_token.get('address'):
+        transaction_type = 'BUY'  # Acquiring the target token
+    elif token_address == from_token.get('address'):
+        transaction_type = 'SELL'  # Disposing of the target token
+    else:
+        transaction_type = 'UNKNOWN'  # Neither token matches our target
+    
+    # Calculate value in USD using nearest_price
     value_usd = None
-    if token_address == base.get('address') and base.get('uiAmount') is not None:
-        price = trade.get('basePrice', base.get('nearestPrice'))
-        if price:
+    if token_address == base.get('address'):
+        # Our target token is the base token
+        price = base.get('nearest_price', trade.get('base_price'))
+        amount = abs(base.get('ui_change_amount', base.get('ui_amount', 0)))
+        if price and amount:
             try:
-                value_usd = float(base.get('uiAmount')) * float(price)
+                value_usd = float(amount) * float(price)
             except (ValueError, TypeError):
                 pass
-    elif token_address == quote.get('address') and quote.get('uiAmount') is not None:
-        price = trade.get('quotePrice', quote.get('nearestPrice'))
-        if price:
+    elif token_address == quote.get('address'):
+        # Our target token is the quote token
+        price = quote.get('nearest_price', trade.get('quote_price'))
+        amount = abs(quote.get('ui_change_amount', quote.get('ui_amount', 0)))
+        if price and amount:
             try:
-                value_usd = float(quote.get('uiAmount')) * float(price)
+                value_usd = float(amount) * float(price)
             except (ValueError, TypeError):
                 pass
     
-    # Create timestamp
+    # Create timestamp from block_unix_time
     trade_timestamp = fetched_at
-    if trade.get('blockUnixTime'):
+    if trade.get('block_unix_time'):
         try:
-            trade_timestamp = pd.Timestamp(trade.get('blockUnixTime'), unit='s', tz='UTC')
+            trade_timestamp = pd.Timestamp(trade.get('block_unix_time'), unit='s', tz='UTC')
         except (ValueError, TypeError):
             pass
     
@@ -649,28 +670,28 @@ def transform_trade(trade: Dict[str, Any], wallet_address: str, token_address: s
         
         # Transaction metadata
         "source": trade.get('source', ''),
-        "block_unix_time": trade.get('blockUnixTime'),
-        "tx_type": trade.get('txType', trade.get('type', '')),
+        "block_unix_time": trade.get('block_unix_time'),  # Fixed field name
+        "tx_type": trade.get('tx_type', ''),  # Fixed field name
         "timestamp": trade_timestamp,
         "transaction_type": transaction_type,
         
-        # From token details
+        # From token details (token being sold/sent)
         "from_symbol": from_token.get('symbol', ''),
         "from_address": from_token.get('address', ''),
         "from_decimals": from_token.get('decimals'),
-        "from_amount": from_token.get('uiAmount'),
-        "from_raw_amount": str(from_token.get('amount', '')),
+        "from_amount": abs(from_token.get('ui_change_amount', from_token.get('ui_amount', 0))),  # Use absolute value of change
+        "from_raw_amount": str(abs(from_token.get('change_amount', from_token.get('amount', 0)))),
         
-        # To token details
+        # To token details (token being bought/received)
         "to_symbol": to_token.get('symbol', ''),
         "to_address": to_token.get('address', ''),
         "to_decimals": to_token.get('decimals'),
-        "to_amount": to_token.get('uiAmount'),
-        "to_raw_amount": str(to_token.get('amount', '')),
+        "to_amount": abs(to_token.get('ui_change_amount', to_token.get('ui_amount', 0))),  # Use absolute value of change
+        "to_raw_amount": str(abs(to_token.get('change_amount', to_token.get('amount', 0)))),
         
         # Pricing and value
-        "base_price": trade.get('basePrice'),
-        "quote_price": trade.get('quotePrice'),
+        "base_price": trade.get('base_price'),  # Fixed field name
+        "quote_price": trade.get('quote_price'),  # Fixed field name
         "value_usd": value_usd,
         
         # PnL processing fields
@@ -756,39 +777,18 @@ def fetch_bronze_wallet_transactions(**context):
                     trades = response['data'].get('items', response['data'].get('trades', []))
             
         except Exception as e:
-            logger.warning(f"API error for wallet {wallet_address[:10]}...: {e}")
-            trades = []  # Continue with empty trades, will use mock data
+            logger.error(f"CRITICAL: BirdEye API error for wallet {wallet_address[:10]}...: {e}")
+            import traceback
+            logger.error(f"Full traceback: {traceback.format_exc()}")
+            trades = []  # Continue with empty trades - NO MOCK DATA
         
-        # If no trades from API or API failed, create minimal mock data for testing
+        # If no trades from API or API failed, STOP using mock data and log the issue
         if not trades:
-            logger.warning(f"No trades returned for wallet {wallet_address[:10]}... - using test data")
-            trades = [
-                {
-                    'txHash': f'mock_tx_{i}_{wallet_address[:8]}',
-                    'type': 'swap',
-                    'blockUnixTime': int(fetched_at.timestamp()) - (i * 3600),
-                    'source': 'raydium',
-                    'base': {
-                        'address': token_address,
-                        'symbol': token_symbol,
-                        'decimals': 9,
-                        'uiAmount': 100.5 * (i + 1),
-                        'amount': str(int(100.5 * (i + 1) * 1e9)),
-                        'typeSwap': 'from' if i % 2 == 0 else 'to'
-                    },
-                    'quote': {
-                        'address': 'So11111111111111111111111111111111111111112',
-                        'symbol': 'SOL',
-                        'decimals': 9,
-                        'uiAmount': 2.5 * (i + 1),
-                        'amount': str(int(2.5 * (i + 1) * 1e9)),
-                        'typeSwap': 'to' if i % 2 == 0 else 'from'
-                    },
-                    'basePrice': 0.025,
-                    'quotePrice': 40.0
-                }
-                for i in range(min(3, MAX_TRANSACTIONS_PER_WALLET))  # Mock 3 transactions per wallet
-            ]
+            logger.error(f"CRITICAL: No trades returned for wallet {wallet_address[:10]}... - BirdEye API failed")
+            logger.error(f"Wallet: {wallet_address}, Token: {token_symbol}")
+            logger.error("This means PnL calculations will be incomplete or fail")
+            # DO NOT CREATE MOCK DATA - this was hiding the real problem
+            trades = []
         
         # Transform trades to our schema
         for trade in trades:

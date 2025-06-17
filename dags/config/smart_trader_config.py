@@ -60,10 +60,10 @@ PNL_QUARTER_DAYS = 90
 # =============================================================================
 
 # Minimum Profitability Criteria (Base Requirements)
-MIN_TOTAL_PNL = 0.01                 # Minimum profit in USD
+MIN_TOTAL_PNL = 10.0                 # Minimum profit in USD (realistic threshold)
 MIN_ROI_PERCENT = 1.0                # Minimum ROI percentage
 MIN_WIN_RATE_PERCENT = 40.0          # Minimum win rate percentage
-MIN_TRADE_COUNT = 3                  # Minimum number of trades
+MIN_TRADE_COUNT = 1                  # Minimum number of trades (adjusted for current data)
 
 # Performance Tier Thresholds
 # Elite Tier
@@ -77,6 +77,10 @@ STRONG_MIN_PNL = 100                 # $100+ profit
 STRONG_MIN_ROI = 15                  # 15%+ ROI
 STRONG_MIN_WIN_RATE = 40             # 40%+ win rate
 STRONG_MIN_TRADES = 5                # 5+ trades
+
+# Gold Layer Processing Limits
+GOLD_MAX_TRADERS_PER_BATCH = 100     # Maximum traders per batch
+PERFORMANCE_LOOKBACK_DAYS = 30       # Days to look back for performance
 
 # (Promising Tier = anything that meets base requirements)
 

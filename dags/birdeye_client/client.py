@@ -375,23 +375,28 @@ class BirdEyeAPIClient:
         
         return response.json()
     
-    def get_wallet_transactions(self, wallet_address: str, limit: int = 100, **params) -> Dict[str, Any]:
+    def get_wallet_transactions(self, wallet_address: str, limit: int = 100, offset: int = 0, **params) -> Dict[str, Any]:
         """
-        Get trade history for a specific wallet address.
+        Get trade history for a specific wallet address using the trader/txs/seek_by_time endpoint.
         
         Args:
             wallet_address: Wallet address to get trades for
             limit: Number of trades to return (max 100)
+            offset: Offset for pagination
             **params: Additional parameters
             
         Returns:
             Wallet trade history data
         """
-        params['wallet'] = wallet_address
+        params['address'] = wallet_address  # Fixed parameter name
         params['limit'] = min(limit, 100)  # API max is typically 100
+        params['offset'] = offset
         
         url = BirdEyeEndpoints.build_url(BirdEyeEndpoints.WALLET_TRANSACTIONS, params)
-        response = self._make_request('GET', url)
+        
+        # Add required headers for this endpoint
+        additional_headers = {'x-chain': 'solana', 'accept': 'application/json'}
+        response = self._make_request('GET', url, headers=additional_headers)
         
         return response.json()
     
