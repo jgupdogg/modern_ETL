@@ -14,11 +14,12 @@ This is an Apache Airflow project for orchestrating data pipelines, using Docker
    - **DAG**: `smart_trader_identification_dag`
    - **Documentation**: See `SMART_TRADER_PIPELINE.md`
 
-2. **Webhook Notification Pipeline** (🚧 IN DEVELOPMENT)
+2. **Webhook Notification Pipeline** (✅ PRODUCTION READY)
    - **Purpose**: Real-time blockchain event processing via Helius webhooks
    - **Data Location**: `s3://webhook-data/` bucket in MinIO  
    - **Components**: FastAPI webhook listener, PySpark streaming, DuckDB analytics
-   - **Status**: Core infrastructure complete, analytics layer in development
+   - **Status**: Complete medallion architecture (Bronze → Silver → Gold)
+   - **Configuration**: Centralized in `dags/config/webhook_config.py`
 
 ## Key Commands
 
@@ -298,9 +299,9 @@ python pyspark_minio_test.py
 ### PySpark Data Flow
 
 ```
-Webhooks → Redpanda (971K+ messages) → PySpark Streaming (last 1000) → Bronze Layer → MinIO
-                                                    ↓
-                                          Silver Transformation → Analytics
+Webhooks → Redpanda → PySpark Streaming → Bronze Layer (MinIO) → Silver Layer (DuckDB) → Gold Layer (Analytics)
+              ↓              ↓                   ↓                       ↓                      ↓
+         971K+ msgs    Batch limit 1000    Partitioned Parquet    Event categorization    Trending/Whale analysis
 ```
 
 **Features:**
@@ -485,6 +486,34 @@ SELECT * FROM silver.data_quality_metrics;
 - **Storage Efficiency**: Parquet compression with date partitioning
 - **Deduplication**: 100% data integrity preservation
 
+## 🔧 Centralized Configuration System
+
+### Webhook Pipeline Configuration
+All webhook pipeline settings are centralized in `dags/config/webhook_config.py`:
+
+```bash
+# View all webhook configuration parameters
+cat dags/config/webhook_config.py
+
+# Test configuration import
+cd dags && python3 -c "from config.webhook_config import BRONZE_BATCH_SIZE_LIMIT; print(f'Batch Limit: {BRONZE_BATCH_SIZE_LIMIT}')"
+```
+
+### Key Configuration Categories:
+- **Infrastructure**: Redpanda brokers, MinIO endpoints, authentication
+- **Bronze Layer**: Batch sizes, memory limits, processing windows, schema validation
+- **Silver Layer**: Data quality thresholds, transaction filtering, deduplication settings
+- **Gold Layer**: Analytics parameters, trending thresholds, whale detection limits
+- **PySpark**: Memory allocation, JAR packages, S3A configuration
+- **Monitoring**: Health checks, performance tracking, data quality alerts
+
+### Configuration Benefits:
+- ✅ **75+ tunable parameters** in single file mirroring smart trader config structure
+- ✅ **Environment variable support** for different deployment environments
+- ✅ **No hardcoded values** in DAG task modules
+- ✅ **Easy production tuning** for scaling and performance optimization
+- ✅ **Helper functions** for S3 paths, Spark configs, and processing status fields
+
 ## Pipeline-Specific Commands
 
 ### Smart Trader Identification Pipeline
@@ -509,22 +538,30 @@ docker exec claude_pipeline-duckdb python3 /scripts/analyze_silver_pnl_data.py
 
 ### Webhook Notification Pipeline  
 
-**Data Location**: `s3://webhook-data/`
+**Data Location**: `s3://webhook-data/`  
+**Configuration**: Centralized in `dags/config/webhook_config.py` with 75+ tunable parameters
 
 ```bash
-# PySpark streaming pipeline (processes webhooks → bronze layer)
-docker compose run airflow-cli airflow dags trigger pyspark_streaming_pipeline
+# Complete medallion architecture pipeline
+docker compose run airflow-cli airflow dags trigger pyspark_streaming_pipeline       # Bronze layer
+docker compose run airflow-cli airflow dags trigger silver_webhook_transformation   # Silver layer  
+docker compose run airflow-cli airflow dags trigger gold_webhook_analytics          # Gold layer
 
-# Silver webhook transformations (DuckDB-based)
-docker compose run airflow-cli airflow dags trigger silver_webhook_transformation
+# Individual layer processing
+docker compose run airflow-cli airflow dags trigger pyspark_streaming_pipeline      # Redpanda → Bronze
+docker compose run airflow-cli airflow dags trigger silver_webhook_transformation   # Bronze → Silver
+docker compose run airflow-cli airflow dags trigger gold_webhook_analytics          # Silver → Gold
 
 # Test webhook ingestion
 curl -X POST http://localhost:8000/webhooks \
   -H "Content-Type: application/json" \
   -d '{"test": "data", "value": 123}'
 
-# Monitor webhook processing
-docker exec claude_pipeline-duckdb python3 /scripts/duckdb_minio_test.py
+# Topic management and cleanup
+python scripts/webhook/redpanda_cleanup.py --keep 2000 --execute
+
+# Monitor processing and validate data quality
+docker exec claude_pipeline-duckdb python3 /scripts/duckdb/duckdb_final_validation.py
 ```
 
 ## Infrastructure Learnings & Requirements
