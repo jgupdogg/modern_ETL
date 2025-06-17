@@ -1,6 +1,6 @@
 # Modern ETL Pipeline - Dual Pipeline Architecture
 
-A comprehensive data pipeline system with two distinct processing pipelines: Smart Trader Identification (production-ready) and Webhook Notifications (in development). Built with Apache Airflow, PySpark, MinIO, and cloud-native technologies implementing medallion architecture.
+A comprehensive data pipeline system with two production-ready processing pipelines: Smart Trader Identification and Webhook Notifications. Built with Apache Airflow, PySpark, MinIO, and cloud-native technologies implementing complete medallion architecture.
 
 ## 🚀 Pipeline Overview
 
@@ -10,11 +10,11 @@ A comprehensive data pipeline system with two distinct processing pipelines: Sma
 - **Data**: `s3://solana-data/` bucket with bronze/silver/gold layers
 - **Status**: Fully operational with optimized data processing
 
-### 2. Webhook Notification Pipeline 🚧 **IN DEVELOPMENT**  
+### 2. Webhook Notification Pipeline ✅ **PRODUCTION READY**  
 - **Purpose**: Real-time blockchain event processing and analytics
 - **Technology**: FastAPI → Redpanda → PySpark → DuckDB → MinIO
-- **Data**: `s3://webhook-data/` bucket with streaming architecture
-- **Status**: Core infrastructure complete, analytics layer in development
+- **Data**: `s3://webhook-data/` bucket with complete medallion architecture
+- **Status**: Bronze → Silver → Gold layers with centralized configuration
 
 ## 🏗️ Key Technologies
 
@@ -58,15 +58,17 @@ docker compose run airflow-cli airflow variables set BIRDSEYE_API_KEY "your_api_
 ### Pipeline-Specific Documentation
 - **Smart Trader Pipeline**: See `SMART_TRADER_PIPELINE.md` for complete details
 - **Operational Commands**: See `CLAUDE.md` for Docker commands and service management
-- **Webhook Pipeline**: In development, see `CLAUDE.md` for current status
+- **Webhook Pipeline**: See `CLAUDE.md` for medallion architecture commands and configuration
 
 ### Key Commands
 ```bash
 # Smart Trader Pipeline
 docker compose run airflow-cli airflow dags trigger smart_trader_identification
 
-# Webhook Pipeline  
-docker compose run airflow-cli airflow dags trigger pyspark_streaming_pipeline
+# Webhook Pipeline (Complete Medallion Architecture)
+docker compose run airflow-cli airflow dags trigger pyspark_streaming_pipeline       # Bronze
+docker compose run airflow-cli airflow dags trigger silver_webhook_transformation   # Silver
+docker compose run airflow-cli airflow dags trigger gold_webhook_analytics          # Gold
 
 # Service Management
 docker-compose up -d        # Start all services
@@ -84,8 +86,12 @@ docker-compose down         # Stop services
 ├── config/                      # Airflow configuration
 ├── dags/                       # Airflow DAGs
 │   ├── smart_trader_identification_dag.py  # Main smart trader pipeline
+│   ├── pyspark_streaming_dag.py             # Webhook bronze layer processing
+│   ├── silver_webhook_transformation_dag.py # Webhook silver layer processing
+│   ├── gold_webhook_analytics_dag.py        # Webhook gold layer analytics
 │   ├── config/                  # 🆕 Centralized configuration
-│   │   └── smart_trader_config.py  # 67 configurable parameters
+│   │   ├── smart_trader_config.py  # 67 configurable parameters
+│   │   └── webhook_config.py       # 75+ webhook pipeline parameters
 │   ├── tasks/                   # Modular task implementations
 │   │   ├── bronze_tasks.py      # Data ingestion (BirdEye API)
 │   │   ├── silver_tasks.py      # Data transformation (PySpark)
@@ -103,10 +109,11 @@ docker-compose down         # Stop services
 ### 🔧 Configuration Architecture
 
 The project uses a **centralized configuration system** with:
-- **67 configurable parameters** across all pipeline layers
-- **Single source of truth** in `dags/config/smart_trader_config.py`
+- **Smart Trader Pipeline**: 67 configurable parameters in `smart_trader_config.py`
+- **Webhook Pipeline**: 75+ configurable parameters in `webhook_config.py`
+- **Single source of truth** for each pipeline with no hardcoded values
 - **Environment variable support** for deployment flexibility
-- **Layer-organized settings**: Bronze, Silver, Gold, Helius, Infrastructure
+- **Layer-organized settings**: Bronze, Silver, Gold layer configurations
 - **Production-ready tuning**: Easy parameter adjustment for different environments
 
 ## 🚧 Project Status
@@ -118,11 +125,12 @@ The project uses a **centralized configuration system** with:
 - Helius webhook integration for real-time monitoring
 - Optimized data storage with proper partitioning
 
-### Webhook Notification Pipeline 🚧 **IN DEVELOPMENT**
-- Core infrastructure: FastAPI → Redpanda → PySpark → MinIO ✅
-- Bronze layer streaming processing ✅
-- Silver layer transformations with DuckDB ✅  
-- Analytics and gold layer development 🚧
+### Webhook Notification Pipeline ✅ **PRODUCTION READY**
+- Complete medallion architecture: Bronze → Silver → Gold ✅
+- Bronze layer: PySpark streaming from Redpanda to MinIO ✅
+- Silver layer: DuckDB transformations with event categorization ✅  
+- Gold layer: Trending tokens and whale activity analytics ✅
+- Centralized configuration with 75+ tunable parameters ✅
 
 ## 📝 License
 
