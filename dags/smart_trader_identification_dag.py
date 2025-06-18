@@ -23,33 +23,200 @@ from config.smart_trader_config import get_spark_config
 
 def bronze_token_list_task(**context):
     """Task 1: Fetch token list from BirdEye API"""
-    from tasks.bronze_tasks import fetch_bronze_token_list
-    return fetch_bronze_token_list(**context)
+    logger = logging.getLogger(__name__)
+    
+    try:
+        from tasks.bronze_tasks import fetch_bronze_token_list
+        result = fetch_bronze_token_list(**context)
+        
+        # Log aggregated success info
+        if result and isinstance(result, list):
+            logger.info(f"✅ BRONZE TOKENS: Successfully fetched {len(result)} tokens")
+        else:
+            logger.warning("⚠️ BRONZE TOKENS: No token data returned")
+            
+        return result
+        
+    except Exception as e:
+        # Log major errors only
+        if "429" in str(e) or "rate limit" in str(e).lower():
+            logger.error("❌ CRITICAL: BirdEye API rate limit exceeded")
+        elif "401" in str(e) or "403" in str(e) or "auth" in str(e).lower():
+            logger.error("❌ CRITICAL: BirdEye API authentication failed")
+        elif "timeout" in str(e).lower():
+            logger.error("❌ CRITICAL: BirdEye API timeout")
+        else:
+            logger.error(f"❌ BRONZE TOKENS FAILED: {str(e)}")
+        raise
 
 def silver_tracked_tokens_task(**context):
     """Task 2: Filter high-performance tokens"""
-    from tasks.silver_tasks import transform_silver_tracked_tokens
-    return transform_silver_tracked_tokens(**context)
+    logger = logging.getLogger(__name__)
+    
+    try:
+        from tasks.silver_tasks import transform_silver_tracked_tokens
+        result = transform_silver_tracked_tokens(**context)
+        
+        # Log aggregated success info
+        if result and isinstance(result, list):
+            logger.info(f"✅ SILVER TOKENS: Filtered to {len(result)} high-performance tokens")
+        else:
+            logger.warning("⚠️ SILVER TOKENS: No filtered tokens returned")
+            
+        return result
+        
+    except Exception as e:
+        # Log major errors only
+        if "no data" in str(e).lower() or "empty" in str(e).lower():
+            logger.error("❌ CRITICAL: No bronze token data available for filtering")
+        elif "threshold" in str(e).lower():
+            logger.error("❌ SILVER TOKENS: Performance threshold filtering failed")
+        else:
+            logger.error(f"❌ SILVER TOKENS FAILED: {str(e)}")
+        raise
 
 def bronze_token_whales_task(**context):
     """Task 3: Fetch whale data for tracked tokens"""
-    from tasks.bronze_tasks import fetch_bronze_token_whales
-    return fetch_bronze_token_whales(**context)
+    logger = logging.getLogger(__name__)
+    
+    try:
+        from tasks.bronze_tasks import fetch_bronze_token_whales
+        result = fetch_bronze_token_whales(**context)
+        
+        # Log aggregated success info
+        if result and isinstance(result, dict):
+            whales_count = result.get('total_whales_saved', 0)
+            tokens_processed = result.get('tokens_processed', 0)
+            logger.info(f"✅ BRONZE WHALES: Processed {tokens_processed} tokens, found {whales_count} whale holders")
+        else:
+            logger.warning("⚠️ BRONZE WHALES: No whale data returned")
+            
+        return result
+        
+    except Exception as e:
+        # Log major errors only
+        if "429" in str(e) or "rate limit" in str(e).lower():
+            logger.error("❌ CRITICAL: BirdEye API rate limit exceeded (whale data)")
+        elif "401" in str(e) or "403" in str(e) or "auth" in str(e).lower():
+            logger.error("❌ CRITICAL: BirdEye API authentication failed (whale data)")
+        elif "timeout" in str(e).lower():
+            logger.error("❌ CRITICAL: BirdEye API timeout (whale data)")
+        elif "no tokens" in str(e).lower():
+            logger.error("❌ CRITICAL: No tracked tokens available for whale fetching")
+        else:
+            logger.error(f"❌ BRONZE WHALES FAILED: {str(e)}")
+        raise
 
 def bronze_wallet_transactions_task(**context):
     """Task 4: Fetch transaction history for whale wallets"""
-    from tasks.bronze_tasks import fetch_bronze_wallet_transactions
-    return fetch_bronze_wallet_transactions(**context)
+    logger = logging.getLogger(__name__)
+    
+    try:
+        from tasks.bronze_tasks import fetch_bronze_wallet_transactions
+        result = fetch_bronze_wallet_transactions(**context)
+        
+        # Log aggregated success info
+        if result and isinstance(result, dict):
+            wallets_processed = result.get('wallets_processed', 0)
+            transactions_saved = result.get('total_transactions_saved', 0)
+            mock_data_used = result.get('mock_data_used', False)
+            
+            if mock_data_used:
+                logger.warning(f"⚠️ BRONZE TRANSACTIONS: Used mock data for {wallets_processed} wallets (API issues)")
+            else:
+                logger.info(f"✅ BRONZE TRANSACTIONS: Processed {wallets_processed} wallets, saved {transactions_saved} transactions")
+        else:
+            logger.warning("⚠️ BRONZE TRANSACTIONS: No transaction data returned")
+            
+        return result
+        
+    except Exception as e:
+        # Log major errors only
+        if "429" in str(e) or "rate limit" in str(e).lower():
+            logger.error("❌ CRITICAL: BirdEye API rate limit exceeded (transactions)")
+        elif "401" in str(e) or "403" in str(e) or "auth" in str(e).lower():
+            logger.error("❌ CRITICAL: BirdEye API authentication failed (transactions)")
+        elif "timeout" in str(e).lower():
+            logger.error("❌ CRITICAL: BirdEye API timeout (transactions)")
+        elif "404" in str(e):
+            logger.error("❌ CRITICAL: BirdEye API endpoint not found (check wallet transactions endpoint)")
+        elif "no wallets" in str(e).lower():
+            logger.error("❌ CRITICAL: No whale wallets available for transaction fetching")
+        else:
+            logger.error(f"❌ BRONZE TRANSACTIONS FAILED: {str(e)}")
+        raise
 
 def gold_top_traders_task(**context):
     """Task 6: Create top trader analytics"""
-    from tasks.gold_tasks import transform_gold_top_traders
-    return transform_gold_top_traders(**context)
+    logger = logging.getLogger(__name__)
+    
+    try:
+        from tasks.gold_tasks import transform_gold_top_traders
+        result = transform_gold_top_traders(**context)
+        
+        # Log aggregated success info
+        if result and isinstance(result, dict):
+            traders_count = result.get('smart_traders_count', 0)
+            dbt_status = result.get('dbt_status', 'unknown')
+            
+            if dbt_status == 'success':
+                logger.info(f"✅ GOLD TRADERS: Identified {traders_count} smart traders via dbt")
+            else:
+                logger.warning(f"⚠️ GOLD TRADERS: dbt run issues, found {traders_count} traders")
+        else:
+            logger.warning("⚠️ GOLD TRADERS: No analytics result returned")
+            
+        return result
+        
+    except Exception as e:
+        # Log major errors only
+        if "dbt" in str(e).lower():
+            logger.error("❌ CRITICAL: dbt transformation failed (gold layer)")
+        elif "no silver data" in str(e).lower():
+            logger.error("❌ CRITICAL: No silver PnL data available for gold transformation")
+        elif "sql" in str(e).lower() or "database" in str(e).lower():
+            logger.error("❌ CRITICAL: Database/SQL error in gold transformation")
+        else:
+            logger.error(f"❌ GOLD TRADERS FAILED: {str(e)}")
+        raise
 
 def helius_webhook_update_task(**context):
     """Task 7: Push top traders to Helius (non-critical)"""
-    from tasks.helius_tasks import update_helius_webhook
-    return update_helius_webhook(**context)
+    logger = logging.getLogger(__name__)
+    
+    try:
+        from tasks.helius_tasks import update_helius_webhook
+        result = update_helius_webhook(**context)
+        
+        # Log aggregated success info
+        if result and isinstance(result, dict):
+            addresses_updated = result.get('addresses_updated', 0)
+            webhook_status = result.get('status', 'unknown')
+            
+            if webhook_status == 'success':
+                logger.info(f"✅ HELIUS UPDATE: Successfully updated {addresses_updated} whale addresses")
+            else:
+                logger.warning(f"⚠️ HELIUS UPDATE: Partial success, updated {addresses_updated} addresses")
+        else:
+            logger.warning("⚠️ HELIUS UPDATE: No webhook update result returned")
+            
+        return result
+        
+    except Exception as e:
+        # Log major errors only (but don't fail DAG)
+        if "auth" in str(e).lower() or "401" in str(e) or "403" in str(e):
+            logger.error("❌ HELIUS: Authentication failed (webhook update)")
+        elif "rate limit" in str(e).lower() or "429" in str(e):
+            logger.error("❌ HELIUS: Rate limit exceeded (webhook update)")
+        elif "timeout" in str(e).lower():
+            logger.error("❌ HELIUS: API timeout (webhook update)")
+        elif "no traders" in str(e).lower():
+            logger.warning("⚠️ HELIUS: No smart traders available for webhook update")
+        else:
+            logger.error(f"❌ HELIUS UPDATE FAILED: {str(e)}")
+        
+        # Don't re-raise since this is non-critical
+        return {"status": "failed", "error": str(e)}
 
 # DAG Definition
 default_args = {
@@ -108,7 +275,7 @@ def silver_wallet_pnl_task(**context):
     
     spark.sparkContext.setLogLevel("WARN")
     
-    # Define FIFO UDF (embedded for task)
+    # Define improved FIFO UDF (handles SELL-before-BUY sequences)
     @udf(returnType=StructType([
         StructField("realized_pnl", DoubleType()),
         StructField("unrealized_pnl", DoubleType()),
@@ -123,7 +290,13 @@ def silver_wallet_pnl_task(**context):
         StructField("latest_price", DoubleType())
     ]))
     def calculate_token_pnl_fifo(transactions):
-        """FIFO PnL calculation UDF"""
+        """
+        Improved FIFO PnL calculation that handles:
+        1. SELL transactions before any BUY (tracks as negative inventory)
+        2. Partial matching scenarios
+        3. Better price/value handling
+        4. More accurate trade counting
+        """
         if not transactions:
             return (0.0, 0.0, 0.0, 0.0, 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0)
         
@@ -135,8 +308,10 @@ def silver_wallet_pnl_task(**context):
         
         txn_list.sort(key=lambda x: x['timestamp'])
         
-        # FIFO calculation
-        token_lots = []
+        # Enhanced FIFO tracking
+        buy_lots = []  # FIFO queue for purchases: [{'amount': float, 'price': float, 'cost': float, 'timestamp': float}]
+        sell_queue = []  # Track unmatched sells
+        
         realized_pnl = 0.0
         total_bought = 0.0
         total_sold = 0.0
@@ -155,17 +330,20 @@ def silver_wallet_pnl_task(**context):
                 value_usd = float(txn.get('value_usd') or 0)
                 timestamp = txn.get('timestamp')
                 
+                # Handle timestamp conversion
                 if hasattr(timestamp, 'timestamp'):
                     timestamp_unix = timestamp.timestamp()
                 else:
-                    timestamp_unix = float(timestamp)
+                    timestamp_unix = float(timestamp) if timestamp else 0
                 
+                # Determine price
                 price = base_price or quote_price or 0
                 if price > 0:
                     latest_price = price
                 
-                # Process BUY transactions
+                # Enhanced BUY processing
                 if tx_type == 'BUY' and to_amount > 0:
+                    # Calculate cost basis and price
                     if value_usd > 0:
                         cost_basis = value_usd
                         buy_price = cost_basis / to_amount
@@ -173,18 +351,72 @@ def silver_wallet_pnl_task(**context):
                         buy_price = price
                         cost_basis = to_amount * buy_price
                     else:
+                        # Skip if no price info
                         continue
                     
-                    token_lots.append({
+                    total_bought += cost_basis
+                    
+                    # Add to buy lots queue
+                    buy_lots.append({
                         'amount': to_amount,
                         'price': buy_price,
                         'cost_basis': cost_basis,
                         'timestamp': timestamp_unix
                     })
-                    total_bought += cost_basis
+                    
+                    # Try to match against any pending sells
+                    while sell_queue and buy_lots:
+                        sell_order = sell_queue[0]
+                        buy_lot = buy_lots[0]
+                        
+                        if sell_order['amount'] <= buy_lot['amount']:
+                            # Sell entire pending order against this buy lot
+                            sell_amount = sell_order['amount']
+                            sell_value = sell_amount * sell_order['price']
+                            cost_basis_used = (sell_amount / buy_lot['amount']) * buy_lot['cost_basis']
+                            
+                            lot_pnl = sell_value - cost_basis_used
+                            realized_pnl += lot_pnl
+                            
+                            trade_count += 1
+                            if lot_pnl > 0:
+                                winning_trades += 1
+                            
+                            # Calculate holding time (sell time - buy time)
+                            holding_time = sell_order['timestamp'] - buy_lot['timestamp']
+                            total_holding_time_seconds += max(0, holding_time)
+                            
+                            # Update lots
+                            buy_lot['amount'] -= sell_amount
+                            buy_lot['cost_basis'] -= cost_basis_used
+                            
+                            if buy_lot['amount'] <= 0.001:  # Almost zero, remove
+                                buy_lots.pop(0)
+                            
+                            sell_queue.pop(0)
+                        else:
+                            # Partial sell - use entire buy lot
+                            buy_amount = buy_lot['amount']
+                            sell_value = buy_amount * sell_order['price']
+                            cost_basis_used = buy_lot['cost_basis']
+                            
+                            lot_pnl = sell_value - cost_basis_used
+                            realized_pnl += lot_pnl
+                            
+                            trade_count += 1
+                            if lot_pnl > 0:
+                                winning_trades += 1
+                            
+                            holding_time = sell_order['timestamp'] - buy_lot['timestamp']
+                            total_holding_time_seconds += max(0, holding_time)
+                            
+                            # Update orders
+                            sell_order['amount'] -= buy_amount
+                            buy_lots.pop(0)
                 
-                # Process SELL transactions
+                # Enhanced SELL processing
                 elif tx_type == 'SELL' and from_amount > 0:
+                    # Calculate sale value and price
                     if value_usd > 0:
                         sale_value = value_usd
                         sell_price = sale_value / from_amount
@@ -192,54 +424,67 @@ def silver_wallet_pnl_task(**context):
                         sell_price = price
                         sale_value = from_amount * sell_price
                     else:
+                        # Skip if no price info
                         continue
                     
                     total_sold += sale_value
                     remaining_to_sell = from_amount
                     
-                    while remaining_to_sell > 0 and token_lots:
-                        lot = token_lots[0]
+                    # Try to match against existing buy lots
+                    while remaining_to_sell > 0.001 and buy_lots:
+                        buy_lot = buy_lots[0]
                         
-                        if lot['amount'] <= remaining_to_sell:
-                            # Sell entire lot
-                            lot_sale_value = lot['amount'] * sell_price
-                            lot_pnl = lot_sale_value - lot['cost_basis']
+                        if buy_lot['amount'] <= remaining_to_sell:
+                            # Use entire buy lot
+                            lot_amount = buy_lot['amount']
+                            lot_sale_value = lot_amount * sell_price
+                            lot_pnl = lot_sale_value - buy_lot['cost_basis']
                             realized_pnl += lot_pnl
                             
                             trade_count += 1
                             if lot_pnl > 0:
                                 winning_trades += 1
                             
-                            holding_time = timestamp_unix - lot['timestamp']
-                            total_holding_time_seconds += holding_time
+                            holding_time = timestamp_unix - buy_lot['timestamp']
+                            total_holding_time_seconds += max(0, holding_time)
                             
-                            remaining_to_sell -= lot['amount']
-                            token_lots.pop(0)
+                            remaining_to_sell -= lot_amount
+                            buy_lots.pop(0)
                         else:
-                            # Sell partial lot
-                            sell_fraction = remaining_to_sell / lot['amount']
-                            lot_cost_basis = lot['cost_basis'] * sell_fraction
+                            # Partial lot usage
+                            sell_fraction = remaining_to_sell / buy_lot['amount']
+                            cost_basis_used = buy_lot['cost_basis'] * sell_fraction
                             lot_sale_value = remaining_to_sell * sell_price
-                            lot_pnl = lot_sale_value - lot_cost_basis
+                            lot_pnl = lot_sale_value - cost_basis_used
                             realized_pnl += lot_pnl
                             
                             trade_count += 1
                             if lot_pnl > 0:
                                 winning_trades += 1
                             
-                            holding_time = timestamp_unix - lot['timestamp']
-                            total_holding_time_seconds += holding_time
+                            holding_time = timestamp_unix - buy_lot['timestamp']
+                            total_holding_time_seconds += max(0, holding_time)
                             
-                            lot['amount'] -= remaining_to_sell
-                            lot['cost_basis'] -= lot_cost_basis
+                            # Update remaining lot
+                            buy_lot['amount'] -= remaining_to_sell
+                            buy_lot['cost_basis'] -= cost_basis_used
                             remaining_to_sell = 0
-                            
-            except Exception:
+                    
+                    # If there's still remaining to sell, add to sell queue
+                    if remaining_to_sell > 0.001:
+                        sell_queue.append({
+                            'amount': remaining_to_sell,
+                            'price': sell_price,
+                            'timestamp': timestamp_unix
+                        })
+                        
+            except Exception as e:
+                # Skip problematic transactions but continue processing
                 continue
         
-        # Calculate current position
-        current_position_tokens = sum(lot['amount'] for lot in token_lots)
-        current_position_cost_basis = sum(lot['cost_basis'] for lot in token_lots)
+        # Calculate current position (remaining buy lots)
+        current_position_tokens = sum(lot['amount'] for lot in buy_lots)
+        current_position_cost_basis = sum(lot['cost_basis'] for lot in buy_lots)
         avg_buy_price = (current_position_cost_basis / current_position_tokens) if current_position_tokens > 0 else 0.0
         
         # Calculate unrealized PnL
@@ -248,13 +493,21 @@ def silver_wallet_pnl_task(**context):
             current_value = current_position_tokens * latest_price
             unrealized_pnl = current_value - current_position_cost_basis
         
+        # Average holding time
         avg_holding_time_hours = (total_holding_time_seconds / 3600.0 / trade_count) if trade_count > 0 else 0.0
         
         return (
-            realized_pnl, unrealized_pnl, total_bought, total_sold,
-            trade_count, winning_trades, avg_holding_time_hours,
-            current_position_tokens, current_position_cost_basis,
-            avg_buy_price, latest_price
+            realized_pnl,
+            unrealized_pnl,
+            total_bought,
+            total_sold,
+            trade_count,
+            winning_trades,
+            avg_holding_time_hours,
+            current_position_tokens,
+            current_position_cost_basis,
+            avg_buy_price,
+            latest_price
         )
     
     try:

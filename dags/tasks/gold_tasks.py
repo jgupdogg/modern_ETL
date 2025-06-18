@@ -221,8 +221,11 @@ if PYSPARK_AVAILABLE:
         logger = logging.getLogger(__name__)
         
         try:
-            # Read silver wallet PnL data
-            silver_path = "s3a://solana-data/silver/wallet_pnl/"
+            # Clear Spark metadata cache to avoid stale file references
+            spark.sql("CLEAR CACHE")
+            
+            # Read silver wallet PnL data using wildcard pattern for robustness
+            silver_path = "s3a://solana-data/silver/wallet_pnl/**/*.parquet"
             silver_df = spark.read.parquet(silver_path)
             
             logger.info(f"Read {silver_df.count()} total silver PnL records")
