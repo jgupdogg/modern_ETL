@@ -398,31 +398,11 @@ def transform_silver_wallet_pnl(**context):
         
         logger.info(f"Processing {transactions_df.count()} transactions")
         
-        # Calculate PnL for all timeframes
-        all_timeframe_results = []
+        # Calculate improved wallet-level PnL with all-time trading metrics + multi-timeframe PnL
+        logger.info("Calculating wallet-level PnL with all-time trading metrics and multiple PnL timeframes")
+        final_pnl_results = calculate_improved_wallet_pnl(spark, transactions_df, batch_id)
         
-        for timeframe in PNL_TIMEFRAMES:
-            logger.info(f"Calculating PnL for timeframe: {timeframe}")
-            timeframe_pnl = calculate_timeframe_pnl(spark, transactions_df, timeframe)
-            all_timeframe_results.append(timeframe_pnl)
-        
-        # Union all timeframe results
-        if all_timeframe_results:
-            token_level_pnl = all_timeframe_results[0]
-            for df in all_timeframe_results[1:]:
-                token_level_pnl = token_level_pnl.unionAll(df)
-        else:
-            token_level_pnl = spark.createDataFrame([], get_silver_pnl_schema())
-        
-        logger.info(f"Generated {token_level_pnl.count()} token-level PnL records")
-        
-        # Calculate portfolio-level PnL
-        portfolio_pnl = calculate_portfolio_pnl(spark, token_level_pnl)
-        
-        # Combine token-level and portfolio-level results
-        final_pnl_results = token_level_pnl.unionAll(portfolio_pnl)
-        
-        logger.info(f"Final PnL results: {final_pnl_results.count()} total records")
+        logger.info(f"Final wallet-level PnL results: {final_pnl_results.count()} total records")
         
         # Write results to silver layer
         output_path = write_silver_pnl_data(spark, final_pnl_results, batch_id)
@@ -964,3 +944,192 @@ if PYSPARK_AVAILABLE:
             logger.error(f"Error updating bronze processing status: {e}")
             # Don't fail the entire job if status update fails
             pass
+
+def calculate_improved_wallet_pnl(spark, transactions_df, batch_id):
+    """
+    Calculate improved wallet-level PnL with:
+    - All-time trading metrics (trade_count, frequency, etc.) for bot detection
+    - Multi-timeframe PnL metrics (7, 30, 60 days) for performance analysis
+    """
+    from pyspark.sql.functions import (
+        col, lit, sum as spark_sum, avg, count, max as spark_max, min as spark_min,
+        when, datediff, current_date, current_timestamp, desc
+    )
+    from datetime import datetime, timedelta
+    
+    logger = logging.getLogger(__name__)
+    current_time = datetime.utcnow()
+    
+    # Define PnL timeframes (days) - 7, 30, 60 day windows for PnL analysis
+    pnl_timeframes = ["7day", "30day", "60day"]
+    timeframe_days = {"7day": 7, "30day": 30, "60day": 60}
+    
+    logger.info("Step 1: Calculate all-time token-level PnL using FIFO methodology")
+    
+    # Calculate FIFO PnL for all transactions (all-time)
+    all_time_token_pnl = transactions_df.groupBy("wallet_address", "token_address").apply(
+        calculate_token_pnl_udf
+    )
+    
+    logger.info(f"Generated {all_time_token_pnl.count()} all-time token-level PnL records")
+    
+    # Step 2: Calculate all-time wallet-level trading metrics (for bot detection)
+    logger.info("Step 2: Calculate all-time wallet-level trading metrics")
+    all_time_wallet_metrics = all_time_token_pnl.groupBy("wallet_address").agg(
+        # Core PnL (all-time)
+        spark_sum("realized_pnl").alias("all_time_realized_pnl"),
+        spark_sum("unrealized_pnl").alias("all_time_unrealized_pnl"), 
+        spark_sum("total_pnl").alias("all_time_total_pnl"),
+        
+        # Trading metrics (all-time) - KEY FOR BOT DETECTION
+        spark_sum("trade_count").alias("total_trades"),
+        (spark_sum("trade_count") / 
+         datediff(current_date(), spark_min("first_transaction"))).alias("avg_trades_per_day"),
+        
+        # Weighted averages across all tokens
+        (spark_sum(col("avg_holding_time_hours") * col("trade_count")) / 
+         spark_sum("trade_count")).alias("avg_holding_time_hours"),
+        (spark_sum(col("avg_transaction_amount_usd") * col("trade_count")) / 
+         spark_sum("trade_count")).alias("avg_transaction_amount_usd"),
+        
+        # Portfolio metrics
+        spark_sum("total_bought").alias("total_bought"),
+        spark_sum("total_sold").alias("total_sold"),
+        count("token_address").alias("unique_tokens_traded"),
+        
+        # Win rate calculation
+        (spark_sum(when(col("total_pnl") > 0, col("trade_count")).otherwise(0)) /
+         spark_sum("trade_count") * 100.0).alias("win_rate_pct"),
+         
+        # ROI calculation
+        when(spark_sum("total_bought") > 0,
+             (spark_sum("total_sold") - spark_sum("total_bought")) / spark_sum("total_bought") * 100.0
+        ).otherwise(0.0).alias("roi_pct"),
+        
+        # Time ranges
+        spark_min("first_transaction").alias("first_transaction"),
+        spark_max("last_transaction").alias("last_transaction"),
+        
+        # Current positions
+        spark_sum("current_position_tokens").alias("current_position_tokens"),
+        spark_sum("current_position_cost_basis").alias("current_position_cost_basis"),
+        spark_sum("current_position_value").alias("current_position_value"),
+        
+        # Metadata
+        lit(current_time).alias("calculation_date"),
+        lit(batch_id).alias("batch_id"),
+        lit(current_time).alias("processed_at")
+    )
+    
+    logger.info(f"Generated all-time metrics for {all_time_wallet_metrics.count()} wallets")
+    
+    # Step 3: Create final records for each PnL timeframe
+    logger.info("Step 3: Generate wallet records for each PnL timeframe")
+    
+    final_results = []
+    
+    for timeframe in pnl_timeframes:
+        days_back = timeframe_days[timeframe]
+        logger.info(f"Creating records for {timeframe} ({days_back} days)")
+        
+        # Filter transactions within timeframe for PnL calculation
+        cutoff_date = current_time - timedelta(days=days_back)
+        recent_transactions = transactions_df.filter(
+            col("timestamp") >= lit(cutoff_date)
+        )
+        
+        # Calculate PnL metrics for this timeframe
+        if recent_transactions.count() > 0:
+            # Calculate FIFO PnL for recent transactions only
+            recent_token_pnl = recent_transactions.groupBy("wallet_address", "token_address").apply(
+                calculate_token_pnl_udf
+            )
+            
+            # Aggregate to wallet level for this timeframe
+            timeframe_wallet_pnl = recent_token_pnl.groupBy("wallet_address").agg(
+                spark_sum("realized_pnl").alias("timeframe_realized_pnl"),
+                spark_sum("unrealized_pnl").alias("timeframe_unrealized_pnl"),
+                spark_sum("total_pnl").alias("timeframe_total_pnl"),
+                
+                # ROI for this timeframe
+                when(spark_sum("total_bought") > 0,
+                     (spark_sum("total_sold") - spark_sum("total_bought")) / spark_sum("total_bought") * 100.0
+                ).otherwise(0.0).alias("timeframe_roi_pct")
+            )
+        else:
+            # No recent transactions - create empty PnL metrics
+            timeframe_wallet_pnl = all_time_wallet_metrics.select("wallet_address").withColumn(
+                "timeframe_realized_pnl", lit(0.0)
+            ).withColumn(
+                "timeframe_unrealized_pnl", lit(0.0)
+            ).withColumn(
+                "timeframe_total_pnl", lit(0.0)
+            ).withColumn(
+                "timeframe_roi_pct", lit(0.0)
+            )
+        
+        # Join all-time trading metrics with timeframe PnL
+        combined_record = all_time_wallet_metrics.join(
+            timeframe_wallet_pnl, 
+            "wallet_address", 
+            "left"  # Keep all wallets even if no recent activity
+        ).select(
+            col("wallet_address"),
+            lit("ALL_TOKENS").alias("token_address"),  # Portfolio-level indicator
+            col("calculation_date"),
+            lit(timeframe).alias("time_period"),
+            
+            # All-time trading metrics (for bot detection)
+            col("total_trades").alias("trade_count"),
+            col("avg_trades_per_day").alias("trade_frequency_daily"),
+            col("avg_holding_time_hours"),
+            col("avg_transaction_amount_usd"),
+            col("total_bought"),
+            col("total_sold"),
+            col("unique_tokens_traded"),
+            col("win_rate_pct").alias("win_rate"),
+            col("first_transaction"),
+            col("last_transaction"),
+            
+            # Current positions (all-time)
+            col("current_position_tokens"),
+            col("current_position_cost_basis"), 
+            col("current_position_value"),
+            
+            # Timeframe-specific PnL metrics
+            col("timeframe_realized_pnl").alias("realized_pnl"),
+            col("timeframe_unrealized_pnl").alias("unrealized_pnl"),
+            col("timeframe_total_pnl").alias("total_pnl"),
+            col("timeframe_roi_pct").alias("roi"),
+            
+            # All-time PnL for reference
+            col("all_time_total_pnl"),
+            col("roi_pct").alias("all_time_roi_pct"),
+            
+            # Processing metadata
+            col("batch_id"),
+            col("processed_at"),
+            lit("birdeye_v3").alias("data_source"),
+            
+            # Gold processing state (initialize as not processed)
+            lit(False).alias("processed_for_gold"),
+            lit(None).cast("timestamp").alias("gold_processed_at"),
+            lit("pending").alias("gold_processing_status"),
+            lit(None).alias("gold_batch_id")
+        )
+        
+        final_results.append(combined_record)
+    
+    # Union all timeframe results
+    if final_results:
+        final_wallet_pnl = final_results[0]
+        for df in final_results[1:]:
+            final_wallet_pnl = final_wallet_pnl.unionAll(df)
+    else:
+        # Create empty DataFrame with proper schema if no results
+        final_wallet_pnl = spark.createDataFrame([], get_silver_pnl_schema())
+    
+    logger.info(f"Final improved wallet PnL: {final_wallet_pnl.count()} records")
+    logger.info("✅ Improved structure: All-time trading metrics + multi-timeframe PnL analysis")
+    
+    return final_wallet_pnl
