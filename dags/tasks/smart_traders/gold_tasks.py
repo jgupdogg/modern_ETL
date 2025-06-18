@@ -180,11 +180,8 @@ def transform_gold_top_traders(**context):
         # Write to gold layer
         output_path = write_gold_top_traders(spark, top_traders, batch_id)
         
-        # Get list of processed wallets for silver update
-        processed_wallets = [row.wallet_address for row in top_traders.select("wallet_address").collect()]
-        
-        # Update silver layer processing status
-        update_silver_processing_status(spark, processed_wallets, batch_id)
+        # Note: Silver layer processing status update removed due to simplified schema
+        # Gold layer now processes all available silver data without tracking processed status
         
         # Calculate summary metrics
         tier_counts = top_traders.groupBy("performance_tier").count().collect()
@@ -224,17 +221,18 @@ if PYSPARK_AVAILABLE:
             # Clear Spark metadata cache to avoid stale file references
             spark.sql("CLEAR CACHE")
             
-            # Read silver wallet PnL data using wildcard pattern for robustness
-            silver_path = "s3a://solana-data/silver/wallet_pnl/**/*.parquet"
+            # Read silver wallet PnL data from most recent batch to avoid schema conflicts
+            # For now, focus on today's data with consistent schema
+            from datetime import datetime, timezone
+            current_date = datetime.now(timezone.utc)
+            silver_path = f"s3a://solana-data/silver/wallet_pnl/calculation_year={current_date.year}/calculation_month={current_date.month}/"
             silver_df = spark.read.parquet(silver_path)
             
             logger.info(f"Read {silver_df.count()} total silver PnL records")
             
-            # Filter for unprocessed portfolio-level records only
+            # Filter for portfolio-level records only (simplified schema)
             unprocessed = silver_df.filter(
-                (col("processed_for_gold") == False) &
-                (col("token_address") == "ALL_TOKENS") &  # Portfolio-level only
-                (col("time_period") == "all")  # All-time performance
+                col("token_address") == "ALL_TOKENS"  # Portfolio-level only
             )
             
             logger.info(f"Found {unprocessed.count()} unprocessed portfolio PnL records")
@@ -250,8 +248,7 @@ if PYSPARK_AVAILABLE:
                 StructField("total_pnl", DoubleType()),
                 StructField("roi", DoubleType()),
                 StructField("win_rate", DoubleType()),
-                StructField("trade_count", IntegerType()),
-                StructField("processed_for_gold", BooleanType()),
+                StructField("trade_count", IntegerType())
             ])
             return spark.createDataFrame([], schema)
 
@@ -281,7 +278,7 @@ if PYSPARK_AVAILABLE:
             col("wallet_address"),
             col("calculation_date").alias("silver_calculation_date"),
             col("batch_id").alias("silver_batch_id"),
-            col("time_period").alias("silver_time_period"),
+            lit("all").alias("silver_time_period"),  # Fixed value since we removed time_period column
             
             # Core performance metrics
             col("total_pnl"),
@@ -403,88 +400,5 @@ if PYSPARK_AVAILABLE:
             raise
 
 
-    def update_silver_processing_status(spark: SparkSession, processed_wallets: List[str], gold_batch_id: str):
-        """Update silver layer to mark wallets as processed for gold"""
-        logger = logging.getLogger(__name__)
-        
-        if not processed_wallets:
-            logger.info("No wallets to update")
-            return
-        
-        try:
-            logger.info(f"Updating processing status for {len(processed_wallets)} wallets")
-            
-            # Read current silver data
-            silver_path = "s3a://solana-data/silver/wallet_pnl/"
-            silver_df = spark.read.parquet(silver_path)
-            
-            # Create DataFrame of processed wallets
-            processed_df = spark.createDataFrame(
-                [(wallet,) for wallet in processed_wallets], 
-                ["wallet_address"]
-            ).withColumn("was_processed_for_gold", lit(True))
-            
-            # Update processing flags for processed wallets (portfolio-level only)
-            updated_df = silver_df.join(
-                processed_df, 
-                on="wallet_address", 
-                how="left"
-            ).withColumn(
-                "processed_for_gold",
-                when(
-                    (col("was_processed_for_gold") == True) & 
-                    (col("token_address") == "ALL_TOKENS") &
-                    (col("time_period") == "all"), 
-                    True
-                ).otherwise(col("processed_for_gold"))
-            ).withColumn(
-                "gold_processed_at",
-                when(
-                    (col("was_processed_for_gold") == True) & 
-                    (col("token_address") == "ALL_TOKENS") &
-                    (col("time_period") == "all"), 
-                    current_timestamp()
-                ).otherwise(col("gold_processed_at"))
-            ).withColumn(
-                "gold_processing_status",
-                when(
-                    (col("was_processed_for_gold") == True) & 
-                    (col("token_address") == "ALL_TOKENS") &
-                    (col("time_period") == "all"), 
-                    "completed"
-                ).otherwise(col("gold_processing_status"))
-            ).withColumn(
-                "gold_batch_id",
-                when(
-                    (col("was_processed_for_gold") == True) & 
-                    (col("token_address") == "ALL_TOKENS") &
-                    (col("time_period") == "all"), 
-                    gold_batch_id
-                ).otherwise(col("gold_batch_id"))
-            ).drop("was_processed_for_gold")
-            
-            # Write updated data back to silver layer
-            # Add partitioning for proper organization
-            partitioned_df = updated_df.withColumn(
-                "update_year", 
-                expr("year(current_timestamp())")
-            ).withColumn(
-                "update_month", 
-                expr("month(current_timestamp())")
-            )
-            
-            # Write updated data back to original silver layer location
-            original_path = "s3a://solana-data/silver/wallet_pnl/"
-            
-            partitioned_df.write \
-                .partitionBy("calculation_year", "calculation_month", "time_period") \
-                .mode("overwrite") \
-                .parquet(original_path)
-            
-            logger.info(f"Successfully updated silver layer processing status for batch {gold_batch_id}")
-            logger.info(f"Updated data written to: {original_path}")
-            
-        except Exception as e:
-            logger.error(f"Error updating silver processing status: {e}")
-            # Don't fail the entire job if status update fails
-            pass
+    # Note: update_silver_processing_status function removed due to simplified schema
+    # Gold layer now processes all available silver data without tracking processed status

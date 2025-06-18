@@ -1,7 +1,7 @@
 {{
     config(
         materialized='table',
-        unique_key=['wallet_address', 'time_period'],
+        unique_key=['wallet_address'],
         on_schema_change='fail',
         post_hook="COPY (SELECT * FROM {{ this }}) TO 's3://{{ var('solana_bucket') }}/gold/smart_wallets/smart_wallets.parquet' (FORMAT PARQUET, COMPRESSION SNAPPY);"
     )
@@ -15,7 +15,6 @@ WITH silver_wallet_pnl AS (
 filtered_smart_wallets AS (
     SELECT 
         wallet_address,
-        time_period,
         trade_count,
         trade_frequency_daily,
         avg_holding_time_hours,
@@ -37,9 +36,8 @@ filtered_smart_wallets AS (
         data_source
     FROM silver_wallet_pnl
     WHERE 
-        -- Focus on portfolio-level records for 'all' timeframe
+        -- Focus on portfolio-level records only (simplified schema)
         token_address = 'ALL_TOKENS' 
-        AND time_period = 'all'
         
         -- Updated gold criteria matching smart_trader_config.py
         AND total_pnl >= 10.0           -- MIN_TOTAL_PNL = 10.0
@@ -53,7 +51,6 @@ filtered_smart_wallets AS (
 ranked_smart_wallets AS (
     SELECT 
         wallet_address,
-        time_period,
         trade_count,
         trade_frequency_daily,
         avg_holding_time_hours,
@@ -93,7 +90,6 @@ ranked_smart_wallets AS (
 
 SELECT 
     wallet_address,
-    time_period,
     trade_count,
     trade_frequency_daily,
     avg_holding_time_hours,

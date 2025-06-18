@@ -83,15 +83,15 @@ BirdEye API → Token List → Token Whales → Wallet Transactions → PnL Calc
 - **Schema**: 19 columns including performance metrics and quality scoring
 - **Status**: ✅ Filtering working correctly
 
-**2. Wallet PnL Metrics** (`wallet_pnl/`)
+**2. Wallet PnL Metrics** (`wallet_pnl/`) - **SCHEMA SIMPLIFIED (June 2025)**
 - **Records**: ✅ **5,958 PnL records** validated in recent test
 - **Technology**: **Enhanced FIFO UDF** handles complex scenarios:
   - SELL transactions before any BUY (negative inventory tracking)
   - Partial matching scenarios
   - Better price/value handling
   - More accurate trade counting
-- **Timeframes**: `all`, `week`, `month`, `quarter`
-- **Processing**: ✅ **729 unprocessed portfolio-level records** available for gold layer
+- **Schema**: **22 columns** (simplified from 27) - removed `time_period` and gold processing metadata
+- **Processing**: ✅ All portfolio-level records (token_address='ALL_TOKENS') available for gold layer
 
 **Enhanced FIFO Features**:
 ```python
@@ -100,7 +100,7 @@ buy_lots = []      # FIFO queue for purchases with lot tracking
 sell_queue = []    # Track unmatched sells for later matching
 ```
 
-**Schema (29 columns)**:
+**Schema (22 columns)** - **SIMPLIFIED JUNE 2025**:
 ```sql
 wallet_address                 VARCHAR      -- Wallet identifier
 token_address                  VARCHAR      -- Token or 'ALL_TOKENS' for portfolio
@@ -197,13 +197,12 @@ logger.info(f"✅ BRONZE TRANSACTIONS: Processed {wallets_processed} wallets, sa
 -- Confirmed: 5,958 total records
 SELECT COUNT(*) FROM parquet_scan('s3://solana-data/silver/wallet_pnl/**/*.parquet');
 
--- Confirmed: 1,502 records with time_period='all'  
+-- Portfolio-level PnL records (simplified schema)
 SELECT COUNT(*) FROM parquet_scan('s3://solana-data/silver/wallet_pnl/**/*.parquet')
-WHERE time_period = 'all';
+WHERE token_address = 'ALL_TOKENS';
 
--- Confirmed: 729 unprocessed portfolio records for gold layer
-SELECT COUNT(*) FROM parquet_scan('s3://solana-data/silver/wallet_pnl/**/*.parquet')
-WHERE processed_for_gold = false AND token_address = 'ALL_TOKENS' AND time_period = 'all';
+-- Schema validation - 22 columns confirmed
+DESCRIBE SELECT * FROM parquet_scan('s3://solana-data/silver/wallet_pnl/**/*.parquet') LIMIT 1;
 ```
 
 **Gold Layer Validation**:

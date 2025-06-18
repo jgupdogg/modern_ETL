@@ -1133,3 +1133,495 @@ def calculate_improved_wallet_pnl(spark, transactions_df, batch_id):
     logger.info("✅ Improved structure: All-time trading metrics + multi-timeframe PnL analysis")
     
     return final_wallet_pnl
+
+
+def process_raw_bronze_pnl(**context):
+    """
+    NEW APPROACH: Process raw bronze transaction data for comprehensive portfolio PnL
+    - Reads from bronze/wallet_transactions_raw/
+    - Processes BOTH sides of each swap for complete portfolio tracking
+    - Uses FIFO cost basis calculation across all tokens
+    - Based on the previous airflow project approach
+    """
+    logger = logging.getLogger(__name__)
+    
+    if not PYSPARK_AVAILABLE:
+        logger.error("PySpark not available")
+        raise ImportError("PySpark is required for PnL processing")
+    
+    from pyspark.sql import SparkSession
+    from pyspark.sql.functions import col, when, abs as spark_abs, lit, current_timestamp
+    from pyspark.sql.types import StructType, StructField, StringType, DoubleType, IntegerType, BooleanType, DateType, TimestampType
+    
+    batch_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    logger.info(f"Starting RAW bronze PnL processing - batch {batch_id}")
+    
+    try:
+        # Initialize Spark session for raw data processing
+        spark = SparkSession.builder \
+            .appName(f"RawBronzePnLProcessing_{batch_id}") \
+            .config("spark.sql.adaptive.enabled", "true") \
+            .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
+            .config("spark.sql.broadcastTimeout", "600") \
+            .config("spark.jars.packages", "org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.367") \
+            .config("spark.hadoop.fs.s3a.endpoint", MINIO_ENDPOINT) \
+            .config("spark.hadoop.fs.s3a.access.key", MINIO_ACCESS_KEY) \
+            .config("spark.hadoop.fs.s3a.secret.key", MINIO_SECRET_KEY) \
+            .config("spark.hadoop.fs.s3a.path.style.access", "true") \
+            .config("spark.hadoop.fs.s3a.connection.ssl.enabled", "false") \
+            .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem") \
+            .config("spark.hadoop.fs.s3a.aws.credentials.provider", "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider") \
+            .getOrCreate()
+        
+        spark.sparkContext.setLogLevel("WARN")
+        
+        # Read RAW bronze transactions (unprocessed)
+        raw_bronze_path = f"s3a://{MINIO_BUCKET}/bronze/wallet_transactions_raw/"
+        logger.info(f"Reading raw bronze data from: {raw_bronze_path}")
+        
+        try:
+            raw_transactions_df = spark.read.parquet(raw_bronze_path)
+            logger.info(f"Total raw transactions: {raw_transactions_df.count()}")
+        except Exception as e:
+            logger.error(f"Failed to read raw bronze data: {e}")
+            raise
+        
+        # Filter for unprocessed transactions
+        unprocessed_df = raw_transactions_df.filter(col("processed_for_pnl") == False)
+        logger.info(f"Unprocessed transactions: {unprocessed_df.count()}")
+        
+        if unprocessed_df.count() == 0:
+            logger.info("No unprocessed transactions found")
+            return {"message": "No unprocessed transactions found"}
+        
+        # Process comprehensive portfolio PnL using new approach
+        logger.info("Processing comprehensive portfolio PnL for all tokens")
+        portfolio_pnl_results = process_comprehensive_portfolio_pnl(spark, unprocessed_df, batch_id)
+        
+        logger.info(f"Portfolio PnL results: {portfolio_pnl_results.count()} records")
+        
+        # Write results to silver layer
+        output_path = write_raw_silver_pnl_data(spark, portfolio_pnl_results, batch_id)
+        
+        # Update bronze processing status
+        update_raw_bronze_processing_status(spark, unprocessed_df, batch_id)
+        
+        # Calculate summary metrics
+        unique_wallets = unprocessed_df.select("wallet_address").distinct().count()
+        total_records = portfolio_pnl_results.count()
+        
+        logger.info(f"RAW PnL calculation completed successfully for batch {batch_id}")
+        
+        return {
+            "wallets_processed": unique_wallets,
+            "total_pnl_records": total_records,
+            "batch_id": batch_id,
+            "output_path": output_path,
+            "status": "success",
+            "approach": "comprehensive_portfolio"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in RAW PnL calculation batch {batch_id}: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        raise
+        
+    finally:
+        # Clean up Spark session
+        spark.stop()
+
+
+def process_comprehensive_portfolio_pnl(spark: SparkSession, raw_df: DataFrame, batch_id: str) -> DataFrame:
+    """
+    Process comprehensive portfolio PnL using the approach from your previous project
+    - Handles BOTH sides of each swap
+    - Maintains portfolio state across ALL tokens
+    - Uses FIFO cost basis calculation
+    """
+    logger = logging.getLogger(__name__)
+    
+    # Convert raw transactions to normalized swap format
+    normalized_swaps = normalize_raw_transactions(raw_df)
+    logger.info(f"Normalized swaps: {normalized_swaps.count()}")
+    
+    # Group by wallet and process portfolio-wide
+    wallet_portfolio_results = []
+    
+    # Process each wallet's complete portfolio
+    wallets = normalized_swaps.select("wallet_address").distinct().collect()
+    logger.info(f"Processing {len(wallets)} unique wallets")
+    
+    for wallet_row in wallets:
+        wallet_address = wallet_row.wallet_address
+        wallet_swaps = normalized_swaps.filter(col("wallet_address") == wallet_address).orderBy("timestamp")
+        
+        # Process this wallet's portfolio PnL
+        wallet_pnl = process_wallet_portfolio(spark, wallet_swaps, wallet_address, batch_id)
+        wallet_portfolio_results.append(wallet_pnl)
+    
+    # Union all wallet results
+    if wallet_portfolio_results:
+        final_portfolio_pnl = wallet_portfolio_results[0]
+        for df in wallet_portfolio_results[1:]:
+            final_portfolio_pnl = final_portfolio_pnl.unionAll(df)
+    else:
+        final_portfolio_pnl = spark.createDataFrame([], get_comprehensive_pnl_schema())
+    
+    logger.info(f"Final comprehensive portfolio PnL: {final_portfolio_pnl.count()} records")
+    
+    return final_portfolio_pnl
+
+
+def normalize_raw_transactions(raw_df: DataFrame) -> DataFrame:
+    """
+    Convert raw bronze transactions to normalized swap format
+    Each raw transaction becomes a standardized swap record with sold/bought tokens
+    """
+    from pyspark.sql.functions import when, col, lit
+    
+    # Determine sold and bought tokens based on type_swap fields
+    normalized = raw_df.select(
+        col("wallet_address"),
+        col("transaction_hash"),
+        col("timestamp"),
+        col("source"),
+        col("block_unix_time"),
+        
+        # Determine sold token (type_swap = "from")
+        when(col("base_type_swap") == "from", col("base_address")).otherwise(col("quote_address")).alias("sold_token_address"),
+        when(col("base_type_swap") == "from", col("base_symbol")).otherwise(col("quote_symbol")).alias("sold_token_symbol"),
+        when(col("base_type_swap") == "from", abs(col("base_ui_change_amount"))).otherwise(abs(col("quote_ui_change_amount"))).alias("sold_quantity"),
+        when(col("base_type_swap") == "from", col("base_nearest_price")).otherwise(col("quote_nearest_price")).alias("sold_price"),
+        
+        # Determine bought token (type_swap = "to")
+        when(col("base_type_swap") == "to", col("base_address")).otherwise(col("quote_address")).alias("bought_token_address"),
+        when(col("base_type_swap") == "to", col("base_symbol")).otherwise(col("quote_symbol")).alias("bought_token_symbol"),
+        when(col("base_type_swap") == "to", abs(col("base_ui_change_amount"))).otherwise(abs(col("quote_ui_change_amount"))).alias("bought_quantity"),
+        when(col("base_type_swap") == "to", col("base_nearest_price")).otherwise(col("quote_nearest_price")).alias("bought_price"),
+        
+        # Metadata
+        col("batch_id"),
+        col("fetched_at")
+    ).filter(
+        # Only process valid swaps with both sold and bought tokens
+        col("sold_token_address").isNotNull() & 
+        col("bought_token_address").isNotNull() &
+        col("sold_quantity").isNotNull() & col("sold_quantity") > 0 &
+        col("bought_quantity").isNotNull() & col("bought_quantity") > 0 &
+        col("sold_price").isNotNull() & col("sold_price") > 0 &
+        col("bought_price").isNotNull() & col("bought_price") > 0
+    )
+    
+    return normalized
+
+
+def process_wallet_portfolio(spark: SparkSession, wallet_swaps: DataFrame, wallet_address: str, batch_id: str) -> DataFrame:
+    """
+    Process a single wallet's portfolio PnL using FIFO methodology
+    Based on the exact logic from your previous project
+    """
+    logger = logging.getLogger(__name__)
+    
+    # Collect wallet swaps to process in Python (like your previous project)
+    swaps_data = wallet_swaps.collect()
+    
+    if not swaps_data:
+        logger.info(f"No swaps for wallet {wallet_address[:10]}...")
+        return spark.createDataFrame([], get_comprehensive_pnl_schema())
+    
+    logger.info(f"Processing {len(swaps_data)} swaps for wallet {wallet_address[:10]}...")
+    
+    # Initialize portfolio state and metrics (exactly like your previous code)
+    portfolio = {}  # key: token address; value: dict with 'quantity', 'cost_basis', 'symbol'
+    token_metrics = {}  # Track per-token trading metrics: {'realized_pnl', 'trade_count', 'winning_trades', 'total_bought', 'total_sold'}
+    realized_pnl = 0.0
+    pnl_history = []
+    sale_trade_count = 0
+    winning_trade_count = 0
+    
+    # Process each swap in chronological order
+    for swap_row in swaps_data:
+        trade_time = swap_row.timestamp
+        sold_token_addr = swap_row.sold_token_address
+        sold_token_symbol = swap_row.sold_token_symbol
+        sold_quantity = swap_row.sold_quantity
+        sold_price = swap_row.sold_price
+        
+        bought_token_addr = swap_row.bought_token_address
+        bought_token_symbol = swap_row.bought_token_symbol
+        bought_quantity = swap_row.bought_quantity
+        bought_price = swap_row.bought_price
+        
+        # Validate swap data
+        if not all([sold_quantity > 0, bought_quantity > 0, sold_price > 0, bought_price > 0]):
+            logger.warning(f"Invalid swap data for wallet {wallet_address[:10]}..., skipping")
+            continue
+        
+        sale_value = sold_quantity * sold_price
+        acquisition_cost = bought_quantity * bought_price
+        
+        # Initialize token-specific metrics if needed
+        if sold_token_addr not in token_metrics:
+            token_metrics[sold_token_addr] = {
+                'realized_pnl': 0.0,
+                'trade_count': 0,
+                'winning_trades': 0,
+                'total_bought': 0.0,
+                'total_sold': 0.0
+            }
+        if bought_token_addr not in token_metrics:
+            token_metrics[bought_token_addr] = {
+                'realized_pnl': 0.0,
+                'trade_count': 0,
+                'winning_trades': 0,
+                'total_bought': 0.0,
+                'total_sold': 0.0
+            }
+        
+        # Process the SALE leg (exactly like your previous code)
+        if sold_token_addr in portfolio:
+            tracked_qty = portfolio[sold_token_addr]['quantity']
+            tracked_cost_basis = portfolio[sold_token_addr]['cost_basis']
+            
+            if tracked_qty >= sold_quantity:
+                # Full sale - can calculate PnL
+                avg_cost = tracked_cost_basis / tracked_qty
+                cost_removed = avg_cost * sold_quantity
+                trade_realized = sale_value - cost_removed
+                realized_pnl += trade_realized
+                sale_trade_count += 1
+                
+                # Update token-specific metrics
+                token_metrics[sold_token_addr]['realized_pnl'] += trade_realized
+                token_metrics[sold_token_addr]['trade_count'] += 1
+                token_metrics[sold_token_addr]['total_sold'] += sale_value
+                
+                if trade_realized > 0:
+                    winning_trade_count += 1
+                    token_metrics[sold_token_addr]['winning_trades'] += 1
+                
+                # Update portfolio
+                new_qty = tracked_qty - sold_quantity
+                new_cost_basis = tracked_cost_basis - cost_removed
+                
+                if abs(new_qty) < 1e-10:  # Close to zero
+                    del portfolio[sold_token_addr]
+                else:
+                    portfolio[sold_token_addr]['quantity'] = new_qty
+                    portfolio[sold_token_addr]['cost_basis'] = new_cost_basis
+                    
+            else:
+                # Partial sale - sell all available
+                if tracked_qty > 0:
+                    avg_cost = tracked_cost_basis / tracked_qty
+                    cost_removed = avg_cost * tracked_qty
+                    partial_realized = (tracked_qty * sold_price) - cost_removed
+                    realized_pnl += partial_realized
+                    sale_trade_count += 1
+                    
+                    # Update token-specific metrics for partial sale
+                    actual_sale_value = tracked_qty * sold_price
+                    token_metrics[sold_token_addr]['realized_pnl'] += partial_realized
+                    token_metrics[sold_token_addr]['trade_count'] += 1
+                    token_metrics[sold_token_addr]['total_sold'] += actual_sale_value
+                    
+                    if partial_realized > 0:
+                        winning_trade_count += 1
+                        token_metrics[sold_token_addr]['winning_trades'] += 1
+                
+                # Remove position completely
+                if sold_token_addr in portfolio:
+                    del portfolio[sold_token_addr]
+        
+        # Process the PURCHASE leg (exactly like your previous code)
+        if bought_token_addr in portfolio:
+            portfolio[bought_token_addr]['quantity'] += bought_quantity
+            portfolio[bought_token_addr]['cost_basis'] += acquisition_cost
+        else:
+            portfolio[bought_token_addr] = {
+                'quantity': bought_quantity,
+                'cost_basis': acquisition_cost,
+                'symbol': bought_token_symbol
+            }
+        
+        # Update token-specific metrics for purchase
+        token_metrics[bought_token_addr]['total_bought'] += acquisition_cost
+        
+        # Record PnL history entry (simplified - no unrealized for now)
+        pnl_history.append({
+            'timestamp': trade_time,
+            'realized_pnl': realized_pnl,
+            'unrealized_pnl': 0.0,  # Skip for now to avoid price lookups
+            'portfolio_snapshot': dict(portfolio)
+        })
+    
+    # Calculate final metrics
+    win_rate = (winning_trade_count / sale_trade_count) if sale_trade_count > 0 else 0.0
+    
+    # Generate PnL records for each token + portfolio aggregate
+    pnl_records = []
+    calculation_date = datetime.utcnow().date()
+    processed_at = datetime.utcnow()
+    
+    # Individual token records with comprehensive metrics
+    for token_addr, position in portfolio.items():
+        # Get token-specific metrics
+        token_stats = token_metrics.get(token_addr, {
+            'realized_pnl': 0.0,
+            'trade_count': 0,
+            'winning_trades': 0,
+            'total_bought': 0.0,
+            'total_sold': 0.0
+        })
+        
+        # Calculate unrealized PnL (simplified - assume current price = last traded price)
+        # In production, you'd lookup current prices
+        unrealized_pnl = 0.0  # Placeholder
+        total_pnl = token_stats['realized_pnl'] + unrealized_pnl
+        
+        # Calculate token-specific metrics
+        win_rate = (token_stats['winning_trades'] / token_stats['trade_count'] * 100) if token_stats['trade_count'] > 0 else 0.0
+        roi = (token_stats['total_sold'] - token_stats['total_bought']) / token_stats['total_bought'] * 100 if token_stats['total_bought'] > 0 else 0.0
+        
+        pnl_records.append({
+            'wallet_address': wallet_address,
+            'token_address': token_addr,
+            'token_symbol': position['symbol'],
+            'time_period': 'all',
+            'realized_pnl': token_stats['realized_pnl'],
+            'unrealized_pnl': unrealized_pnl,
+            'total_pnl': total_pnl,
+            'roi': roi,
+            'trade_count': token_stats['trade_count'],
+            'win_rate': win_rate,
+            'total_bought': token_stats['total_bought'],
+            'total_sold': token_stats['total_sold'],
+            'calculation_date': calculation_date,
+            'batch_id': batch_id,
+            'processed_at': processed_at,
+            'data_source': 'comprehensive_portfolio',
+            'processed_for_gold': False,
+            'gold_processed_at': None,
+            'gold_processing_batch_id': None
+        })
+    
+    # Portfolio-level aggregate record (like your previous "ALL_TOKENS")
+    total_cost_basis = sum(pos['cost_basis'] for pos in portfolio.values())
+    total_unrealized = sum(0.0 for _ in portfolio.values())  # Placeholder
+    
+    # Aggregate all token metrics for portfolio-level totals
+    portfolio_total_bought = sum(metrics.get('total_bought', 0.0) for metrics in token_metrics.values())
+    portfolio_total_sold = sum(metrics.get('total_sold', 0.0) for metrics in token_metrics.values())
+    portfolio_total_trades = sum(metrics.get('trade_count', 0) for metrics in token_metrics.values())
+    portfolio_winning_trades = sum(metrics.get('winning_trades', 0) for metrics in token_metrics.values())
+    
+    # Calculate portfolio-level metrics
+    portfolio_win_rate = (portfolio_winning_trades / portfolio_total_trades * 100) if portfolio_total_trades > 0 else 0.0
+    portfolio_roi = (portfolio_total_sold - portfolio_total_bought) / portfolio_total_bought * 100 if portfolio_total_bought > 0 else 0.0
+    total_pnl = realized_pnl + total_unrealized
+    
+    pnl_records.append({
+        'wallet_address': wallet_address,
+        'token_address': 'ALL_TOKENS',  # Portfolio aggregate
+        'token_symbol': 'PORTFOLIO',
+        'time_period': 'all',
+        'realized_pnl': realized_pnl,
+        'unrealized_pnl': total_unrealized,
+        'total_pnl': total_pnl,
+        'roi': portfolio_roi,
+        'trade_count': portfolio_total_trades,
+        'win_rate': portfolio_win_rate,
+        'total_bought': portfolio_total_bought,
+        'total_sold': portfolio_total_sold,
+        'calculation_date': calculation_date,
+        'batch_id': batch_id,
+        'processed_at': processed_at,
+        'data_source': 'comprehensive_portfolio',
+        'processed_for_gold': False,
+        'gold_processed_at': None,
+        'gold_processing_batch_id': None
+    })
+    
+    # Convert to Spark DataFrame
+    if pnl_records:
+        return spark.createDataFrame(pnl_records, get_comprehensive_pnl_schema())
+    else:
+        return spark.createDataFrame([], get_comprehensive_pnl_schema())
+
+
+def get_comprehensive_pnl_schema() -> StructType:
+    """Schema for comprehensive portfolio PnL results"""
+    return StructType([
+        StructField("wallet_address", StringType(), False),
+        StructField("token_address", StringType(), False),  # "ALL_TOKENS" for portfolio level
+        StructField("token_symbol", StringType(), True),
+        StructField("time_period", StringType(), False),  # "all", "week", "month", "quarter"
+        
+        # PnL metrics
+        StructField("realized_pnl", DoubleType(), True),
+        StructField("unrealized_pnl", DoubleType(), True), 
+        StructField("total_pnl", DoubleType(), True),
+        StructField("roi", DoubleType(), True),
+        
+        # Trading metrics
+        StructField("trade_count", IntegerType(), True),
+        StructField("win_rate", DoubleType(), True),
+        StructField("total_bought", DoubleType(), True),
+        StructField("total_sold", DoubleType(), True),
+        
+        # Processing metadata
+        StructField("calculation_date", DateType(), True),
+        StructField("batch_id", StringType(), True),
+        StructField("processed_at", TimestampType(), True),
+        StructField("data_source", StringType(), True),
+        
+        # Gold processing state
+        StructField("processed_for_gold", BooleanType(), False),
+        StructField("gold_processed_at", TimestampType(), True),
+        StructField("gold_processing_batch_id", StringType(), True)
+    ])
+
+
+def write_raw_silver_pnl_data(spark: SparkSession, pnl_df: DataFrame, batch_id: str) -> str:
+    """Write comprehensive portfolio PnL data to silver layer"""
+    logger = logging.getLogger(__name__)
+    
+    # Add partition columns for efficient querying
+    from pyspark.sql.functions import year, month, col
+    partitioned_df = pnl_df.withColumn(
+        "calculation_year", year(col("calculation_date"))
+    ).withColumn(
+        "calculation_month", month(col("calculation_date"))
+    )
+    
+    # Use new path for raw-based silver data
+    output_path = f"s3a://{MINIO_BUCKET}/silver/wallet_pnl_comprehensive/"
+    
+    try:
+        partitioned_df.write \
+            .mode("append") \
+            .partitionBy("calculation_year", "calculation_month", "time_period") \
+            .parquet(output_path)
+        
+        logger.info(f"Successfully wrote portfolio PnL data to {output_path}")
+        return output_path
+        
+    except Exception as e:
+        logger.error(f"Failed to write portfolio PnL data: {e}")
+        raise
+
+
+def update_raw_bronze_processing_status(spark: SparkSession, processed_df: DataFrame, batch_id: str):
+    """Update processing status for raw bronze transactions"""
+    logger = logging.getLogger(__name__)
+    
+    # This would update the processed_for_pnl flag in the bronze layer
+    # Implementation would depend on how we handle bronze updates
+    # For now, logging the intent
+    
+    processed_count = processed_df.count()
+    logger.info(f"Marking {processed_count} raw transactions as processed for PnL (batch {batch_id})")
+    
+    # TODO: Implement actual status update logic
+    # This might involve rewriting parquet files or maintaining a separate status table

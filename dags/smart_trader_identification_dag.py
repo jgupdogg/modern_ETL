@@ -26,7 +26,7 @@ def bronze_token_list_task(**context):
     logger = logging.getLogger(__name__)
     
     try:
-        from tasks.bronze_tasks import fetch_bronze_token_list
+        from tasks.smart_traders.bronze_tasks import fetch_bronze_token_list
         result = fetch_bronze_token_list(**context)
         
         # Log aggregated success info
@@ -54,7 +54,7 @@ def silver_tracked_tokens_task(**context):
     logger = logging.getLogger(__name__)
     
     try:
-        from tasks.silver_tasks import transform_silver_tracked_tokens
+        from tasks.smart_traders.silver_tasks import transform_silver_tracked_tokens
         result = transform_silver_tracked_tokens(**context)
         
         # Log aggregated success info
@@ -80,7 +80,7 @@ def bronze_token_whales_task(**context):
     logger = logging.getLogger(__name__)
     
     try:
-        from tasks.bronze_tasks import fetch_bronze_token_whales
+        from tasks.smart_traders.bronze_tasks import fetch_bronze_token_whales
         result = fetch_bronze_token_whales(**context)
         
         # Log aggregated success info
@@ -112,7 +112,7 @@ def bronze_wallet_transactions_task(**context):
     logger = logging.getLogger(__name__)
     
     try:
-        from tasks.bronze_tasks import fetch_bronze_wallet_transactions
+        from tasks.smart_traders.bronze_tasks import fetch_bronze_wallet_transactions
         result = fetch_bronze_wallet_transactions(**context)
         
         # Log aggregated success info
@@ -151,7 +151,7 @@ def gold_top_traders_task(**context):
     logger = logging.getLogger(__name__)
     
     try:
-        from tasks.gold_tasks import transform_gold_top_traders
+        from tasks.smart_traders.gold_tasks import transform_gold_top_traders
         result = transform_gold_top_traders(**context)
         
         # Log aggregated success info
@@ -241,13 +241,13 @@ dag = DAG(
 
 @task(dag=dag)
 def silver_wallet_pnl_task(**context):
-    """Task 5: Calculate wallet PnL metrics using PySpark with full FIFO implementation"""
+    """Task 5: Calculate wallet PnL metrics using PySpark with raw bronze data and portfolio-only output"""
     import logging
     from pyspark.sql import SparkSession
     from pyspark.sql.functions import (
         col, lit, when, sum as spark_sum, avg, count, max as spark_max, min as spark_min,
-        collect_list, struct, udf, current_timestamp, expr, coalesce, 
-        unix_timestamp, from_unixtime, datediff, hour, desc, asc, row_number
+        collect_list, struct, udf, current_timestamp, expr, coalesce, abs as spark_abs,
+        unix_timestamp, from_unixtime, datediff, hour, desc, asc, row_number, size
     )
     from pyspark.sql.types import (
         StructType, StructField, StringType, DoubleType, IntegerType, 
@@ -257,11 +257,16 @@ def silver_wallet_pnl_task(**context):
     from datetime import datetime, timedelta, timezone
     
     logger = logging.getLogger(__name__)
-    logger.info("Starting PySpark wallet PnL calculation with full FIFO implementation")
+    logger.info("Starting PySpark wallet PnL calculation with raw bronze data transformation")
     
     # Generate batch ID
     execution_date = context['logical_date']
     batch_id = execution_date.strftime("%Y%m%d_%H%M%S")
+    
+    # Configuration for transaction filtering
+    RECENT_DAYS = 7  # Include all transactions from last N days
+    HISTORICAL_LIMIT = 100  # Maximum total transactions per wallet
+    MIN_TRANSACTIONS = 5  # Skip wallets with too few trades
     
     # Create Spark session with S3A/MinIO support using centralized config
     spark_config = get_spark_config()
@@ -275,7 +280,113 @@ def silver_wallet_pnl_task(**context):
     
     spark.sparkContext.setLogLevel("WARN")
     
-    # Define improved FIFO UDF (handles SELL-before-BUY sequences)
+    # Define raw-to-normalized transformation UDF
+    @udf(returnType=ArrayType(StructType([
+        StructField("token_address", StringType()),
+        StructField("transaction_type", StringType()),
+        StructField("amount", DoubleType()),
+        StructField("price", DoubleType()),
+        StructField("value_usd", DoubleType()),
+        StructField("timestamp", TimestampType()),
+        StructField("transaction_hash", StringType())
+    ])))
+    def transform_raw_to_normalized(raw_transactions):
+        """
+        Transform raw bronze transactions to normalized format.
+        Each swap generates TWO records: one SELL and one BUY.
+        """
+        if not raw_transactions:
+            return []
+            
+        normalized = []
+        
+        for txn in raw_transactions:
+            try:
+                # Skip non-swap transactions
+                if txn.get('tx_type') != 'swap':
+                    continue
+                    
+                # Get swap direction from type_swap fields
+                base_type = txn.get('base_type_swap')
+                quote_type = txn.get('quote_type_swap')
+                
+                # Skip if we can't determine direction
+                if not base_type or not quote_type:
+                    continue
+                
+                # Extract amounts and prices
+                base_amount = abs(float(txn.get('base_ui_change_amount') or 0))
+                quote_amount = abs(float(txn.get('quote_ui_change_amount') or 0))
+                base_price = float(txn.get('base_nearest_price') or 0)
+                quote_price = float(txn.get('quote_nearest_price') or 0)
+                
+                # Skip if amounts are invalid
+                if base_amount == 0 or quote_amount == 0:
+                    continue
+                
+                timestamp = txn.get('timestamp')
+                tx_hash = txn.get('transaction_hash')
+                
+                # Determine which token was sold and which was bought
+                if base_type == 'from' and quote_type == 'to':
+                    # Selling base for quote
+                    # SELL record for base token
+                    if base_price > 0:
+                        normalized.append({
+                            'token_address': txn.get('base_address'),
+                            'transaction_type': 'SELL',
+                            'amount': base_amount,
+                            'price': base_price,
+                            'value_usd': base_amount * base_price,
+                            'timestamp': timestamp,
+                            'transaction_hash': tx_hash
+                        })
+                    
+                    # BUY record for quote token
+                    if quote_price > 0:
+                        normalized.append({
+                            'token_address': txn.get('quote_address'),
+                            'transaction_type': 'BUY',
+                            'amount': quote_amount,
+                            'price': quote_price,
+                            'value_usd': quote_amount * quote_price,
+                            'timestamp': timestamp,
+                            'transaction_hash': tx_hash
+                        })
+                        
+                elif base_type == 'to' and quote_type == 'from':
+                    # Selling quote for base
+                    # SELL record for quote token
+                    if quote_price > 0:
+                        normalized.append({
+                            'token_address': txn.get('quote_address'),
+                            'transaction_type': 'SELL',
+                            'amount': quote_amount,
+                            'price': quote_price,
+                            'value_usd': quote_amount * quote_price,
+                            'timestamp': timestamp,
+                            'transaction_hash': tx_hash
+                        })
+                    
+                    # BUY record for base token
+                    if base_price > 0:
+                        normalized.append({
+                            'token_address': txn.get('base_address'),
+                            'transaction_type': 'BUY',
+                            'amount': base_amount,
+                            'price': base_price,
+                            'value_usd': base_amount * base_price,
+                            'timestamp': timestamp,
+                            'transaction_hash': tx_hash
+                        })
+                        
+            except Exception as e:
+                # Skip problematic transactions
+                continue
+                
+        return normalized
+    
+    # Define improved FIFO UDF for normalized transactions
     @udf(returnType=StructType([
         StructField("realized_pnl", DoubleType()),
         StructField("unrealized_pnl", DoubleType()),
@@ -291,11 +402,8 @@ def silver_wallet_pnl_task(**context):
     ]))
     def calculate_token_pnl_fifo(transactions):
         """
-        Improved FIFO PnL calculation that handles:
-        1. SELL transactions before any BUY (tracks as negative inventory)
-        2. Partial matching scenarios
-        3. Better price/value handling
-        4. More accurate trade counting
+        FIFO PnL calculation for normalized transactions.
+        Expects transactions with: token_address, transaction_type, amount, price, value_usd, timestamp
         """
         if not transactions:
             return (0.0, 0.0, 0.0, 0.0, 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0)
@@ -323,10 +431,8 @@ def silver_wallet_pnl_task(**context):
         for txn in txn_list:
             try:
                 tx_type = txn.get('transaction_type', '').upper()
-                from_amount = float(txn.get('from_amount') or 0)
-                to_amount = float(txn.get('to_amount') or 0)
-                base_price = float(txn.get('base_price') or 0)
-                quote_price = float(txn.get('quote_price') or 0)
+                amount = float(txn.get('amount') or 0)
+                price = float(txn.get('price') or 0)
                 value_usd = float(txn.get('value_usd') or 0)
                 timestamp = txn.get('timestamp')
                 
@@ -336,29 +442,25 @@ def silver_wallet_pnl_task(**context):
                 else:
                     timestamp_unix = float(timestamp) if timestamp else 0
                 
-                # Determine price
-                price = base_price or quote_price or 0
+                # Track latest price
                 if price > 0:
                     latest_price = price
                 
+                # Skip invalid transactions
+                if amount == 0 or price == 0:
+                    continue
+                
                 # Enhanced BUY processing
-                if tx_type == 'BUY' and to_amount > 0:
-                    # Calculate cost basis and price
-                    if value_usd > 0:
-                        cost_basis = value_usd
-                        buy_price = cost_basis / to_amount
-                    elif price > 0:
-                        buy_price = price
-                        cost_basis = to_amount * buy_price
-                    else:
-                        # Skip if no price info
-                        continue
+                if tx_type == 'BUY':
+                    # Calculate cost basis
+                    cost_basis = value_usd if value_usd > 0 else (amount * price)
+                    buy_price = cost_basis / amount if amount > 0 else price
                     
                     total_bought += cost_basis
                     
                     # Add to buy lots queue
                     buy_lots.append({
-                        'amount': to_amount,
+                        'amount': amount,
                         'price': buy_price,
                         'cost_basis': cost_basis,
                         'timestamp': timestamp_unix
@@ -415,20 +517,13 @@ def silver_wallet_pnl_task(**context):
                             buy_lots.pop(0)
                 
                 # Enhanced SELL processing
-                elif tx_type == 'SELL' and from_amount > 0:
-                    # Calculate sale value and price
-                    if value_usd > 0:
-                        sale_value = value_usd
-                        sell_price = sale_value / from_amount
-                    elif price > 0:
-                        sell_price = price
-                        sale_value = from_amount * sell_price
-                    else:
-                        # Skip if no price info
-                        continue
+                elif tx_type == 'SELL':
+                    # Calculate sale value
+                    sale_value = value_usd if value_usd > 0 else (amount * price)
+                    sell_price = sale_value / amount if amount > 0 else price
                     
                     total_sold += sale_value
-                    remaining_to_sell = from_amount
+                    remaining_to_sell = amount
                     
                     # Try to match against existing buy lots
                     while remaining_to_sell > 0.001 and buy_lots:
@@ -511,27 +606,36 @@ def silver_wallet_pnl_task(**context):
         )
     
     try:
-        # Read unprocessed transactions
+        # Read raw bronze transactions
         try:
-            parquet_path = "s3a://solana-data/bronze/wallet_transactions/*/wallet_transactions_*.parquet"
-            bronze_df = spark.read.parquet(parquet_path)
+            # Read only recent raw transactions to avoid schema conflicts
+            # For now, focus on today's data until we clean up the bronze layer schemas
+            current_date = datetime.now(timezone.utc).strftime("date=%Y-%m-%d")
+            parquet_path = f"s3a://solana-data/bronze/wallet_transactions/{current_date}/wallet_transactions_*.parquet"
             
-            # Filter for unprocessed transactions with quality checks
-            clean_df = bronze_df.filter(
-                (col("processed_for_pnl") == False) &
+            bronze_df = spark.read.parquet(parquet_path)
+            logger.info(f"Successfully read raw bronze data from {current_date}")
+            
+            # Deduplicate by transaction hash
+            deduped_df = bronze_df.dropDuplicates(["wallet_address", "transaction_hash"])
+            
+            # Filter for swap transactions only
+            swap_df = deduped_df.filter(
+                (col("tx_type") == "swap") &
                 (col("transaction_hash").isNotNull()) &
                 (col("wallet_address").isNotNull()) &
-                (col("token_address").isNotNull()) &
                 (col("timestamp").isNotNull()) &
-                ((col("from_amount").isNotNull() & (col("from_amount") > 0)) |
-                 (col("to_amount").isNotNull() & (col("to_amount") > 0)))
+                (col("base_address").isNotNull()) &
+                (col("quote_address").isNotNull())
             )
             
-            unfetched_count = clean_df.count()
-            logger.info(f"Found {unfetched_count} clean unprocessed transactions")
+            # Get unique wallets
+            unique_wallets = swap_df.select("wallet_address").distinct().collect()
+            wallet_count = len(unique_wallets)
+            logger.info(f"Found {wallet_count} unique wallets with swap transactions")
             
-            if unfetched_count == 0:
-                logger.info("No unfetched transactions - returning success")
+            if wallet_count == 0:
+                logger.info("No wallets with swap transactions - returning success")
                 return {
                     "wallets_processed": 0,
                     "total_pnl_records": 0,
@@ -539,175 +643,183 @@ def silver_wallet_pnl_task(**context):
                     "status": "no_data"
                 }
             
-            # Calculate PnL for all timeframes
-            timeframes = ['all', 'week', 'month', 'quarter']
-            all_results = []
+            # Process each wallet
+            current_time = datetime.now(timezone.utc)
+            week_ago = current_time - timedelta(days=RECENT_DAYS)
             
-            for timeframe in timeframes:
-                logger.info(f"Calculating PnL for timeframe: {timeframe}")
+            portfolio_results = []
+            wallets_processed = 0
+            
+            for wallet_row in unique_wallets:
+                wallet_address = wallet_row['wallet_address']
                 
-                # Apply time filter
-                current_time = datetime.now(timezone.utc)
-                if timeframe == 'week':
-                    start_time = current_time - timedelta(days=7)
-                    timeframe_df = clean_df.filter(col("timestamp") >= lit(start_time))
-                elif timeframe == 'month':
-                    start_time = current_time - timedelta(days=30)
-                    timeframe_df = clean_df.filter(col("timestamp") >= lit(start_time))
-                elif timeframe == 'quarter':
-                    start_time = current_time - timedelta(days=90)
-                    timeframe_df = clean_df.filter(col("timestamp") >= lit(start_time))
-                else:  # 'all'
-                    timeframe_df = clean_df
+                # Get all transactions for this wallet
+                wallet_txns = swap_df.filter(col("wallet_address") == wallet_address)
                 
-                # Group by wallet and token
-                wallet_token_groups = timeframe_df.groupBy("wallet_address", "token_address").agg(
-                    collect_list(struct([col(c) for c in timeframe_df.columns])).alias("transactions"),
-                    spark_min("timestamp").alias("first_transaction"),
-                    spark_max("timestamp").alias("last_transaction"),
-                    count("*").alias("transaction_count")
-                )
+                # Apply smart filtering: recent + historical
+                recent_txns = wallet_txns.filter(col("timestamp") >= lit(week_ago))
+                recent_count = recent_txns.count()
                 
-                if wallet_token_groups.count() == 0:
-                    logger.info(f"No data for timeframe {timeframe}")
+                if recent_count < HISTORICAL_LIMIT:
+                    # Need more historical context
+                    older_txns = wallet_txns.filter(col("timestamp") < lit(week_ago)) \
+                        .orderBy(col("timestamp").desc()) \
+                        .limit(HISTORICAL_LIMIT - recent_count)
+                    
+                    final_txns = recent_txns.unionAll(older_txns)
+                else:
+                    # Just use recent transactions
+                    final_txns = recent_txns
+                
+                # Skip wallets with too few transactions
+                total_txn_count = final_txns.count()
+                if total_txn_count < MIN_TRANSACTIONS:
+                    logger.info(f"Skipping wallet {wallet_address[:10]}... - only {total_txn_count} transactions")
                     continue
                 
-                # Apply FIFO UDF
-                pnl_results = wallet_token_groups.withColumn(
-                    "pnl_metrics", 
-                    calculate_token_pnl_fifo(col("transactions"))
-                )
+                # Collect all transactions for this wallet
+                wallet_raw_txns = final_txns.orderBy("timestamp").collect()
                 
-                # Extract results and create final schema
-                detailed_results = pnl_results.select(
-                    col("wallet_address"),
-                    col("token_address"),
-                    current_timestamp().cast(DateType()).alias("calculation_date"),
-                    lit(timeframe).alias("time_period"),
-                    
-                    # Core PnL metrics
-                    col("pnl_metrics.realized_pnl"),
-                    col("pnl_metrics.unrealized_pnl"),
-                    (col("pnl_metrics.realized_pnl") + col("pnl_metrics.unrealized_pnl")).alias("total_pnl"),
-                    
-                    # Trading metrics
-                    col("pnl_metrics.trade_count"),
-                    when(col("pnl_metrics.trade_count") > 0, 
-                         col("pnl_metrics.winning_trades") / col("pnl_metrics.trade_count") * 100.0
-                    ).otherwise(0.0).alias("win_rate"),
-                    col("pnl_metrics.total_bought"),
-                    col("pnl_metrics.total_sold"),
-                    when(col("pnl_metrics.total_bought") > 0,
-                         (col("pnl_metrics.total_sold") - col("pnl_metrics.total_bought")) / col("pnl_metrics.total_bought") * 100.0
-                    ).otherwise(0.0).alias("roi"),
-                    col("pnl_metrics.total_holding_time_hours").alias("avg_holding_time_hours"),
-                    when(col("transaction_count") > 0,
-                         (col("pnl_metrics.total_bought") + col("pnl_metrics.total_sold")) / col("transaction_count")
-                    ).otherwise(0.0).alias("avg_transaction_amount_usd"),
-                    
-                    # Trade frequency
-                    when(datediff(col("last_transaction"), col("first_transaction")) > 0,
-                         col("pnl_metrics.trade_count") / datediff(col("last_transaction"), col("first_transaction"))
-                    ).otherwise(col("pnl_metrics.trade_count")).alias("trade_frequency_daily"),
-                    
-                    # Time ranges
-                    col("first_transaction"),
-                    col("last_transaction"),
-                    
-                    # Position metrics
-                    col("pnl_metrics.current_position_tokens"),
-                    col("pnl_metrics.current_position_cost_basis"),
-                    (col("pnl_metrics.current_position_tokens") * col("pnl_metrics.latest_price")).alias("current_position_value"),
-                    
-                    # Processing metadata
-                    current_timestamp().alias("processed_at"),
-                    lit(batch_id).alias("batch_id"),
-                    lit("birdeye_v3").alias("data_source"),
-                    
-                    # Gold layer processing state
-                    lit(False).alias("processed_for_gold"),
-                    lit(None).cast("timestamp").alias("gold_processed_at"),
-                    lit("pending").alias("gold_processing_status"),
-                    lit(None).cast("string").alias("gold_batch_id")
-                )
+                # Transform raw to normalized format
+                wallet_txn_dicts = [row.asDict() for row in wallet_raw_txns]
+                normalized_txns = transform_raw_to_normalized.func(wallet_txn_dicts)
                 
-                all_results.append(detailed_results)
+                if not normalized_txns:
+                    logger.warning(f"No valid normalized transactions for wallet {wallet_address[:10]}...")
+                    continue
+                
+                # Group by token and calculate FIFO PnL
+                token_pnls = {}
+                for norm_txn in normalized_txns:
+                    token_addr = norm_txn['token_address']
+                    if token_addr not in token_pnls:
+                        token_pnls[token_addr] = []
+                    token_pnls[token_addr].append(norm_txn)
+                
+                # Calculate PnL for each token
+                portfolio_metrics = {
+                    'realized_pnl': 0.0,
+                    'unrealized_pnl': 0.0,
+                    'total_bought': 0.0,
+                    'total_sold': 0.0,
+                    'trade_count': 0,
+                    'winning_trades': 0,
+                    'total_holding_time_hours': 0.0,
+                    'current_position_cost_basis': 0.0
+                }
+                
+                for token_addr, token_txns in token_pnls.items():
+                    # Sort by timestamp for FIFO
+                    token_txns.sort(key=lambda x: x['timestamp'])
+                    
+                    # Calculate FIFO PnL for this token
+                    token_result = calculate_token_pnl_fifo.func(token_txns)
+                    
+                    # Aggregate into portfolio metrics
+                    portfolio_metrics['realized_pnl'] += token_result[0]
+                    portfolio_metrics['unrealized_pnl'] += token_result[1]
+                    portfolio_metrics['total_bought'] += token_result[2]
+                    portfolio_metrics['total_sold'] += token_result[3]
+                    portfolio_metrics['trade_count'] += token_result[4]
+                    portfolio_metrics['winning_trades'] += token_result[5]
+                    portfolio_metrics['total_holding_time_hours'] += token_result[6]
+                    portfolio_metrics['current_position_cost_basis'] += token_result[8]
+                
+                # Calculate portfolio-level derived metrics
+                total_pnl = portfolio_metrics['realized_pnl'] + portfolio_metrics['unrealized_pnl']
+                win_rate = (portfolio_metrics['winning_trades'] / portfolio_metrics['trade_count'] * 100.0) \
+                    if portfolio_metrics['trade_count'] > 0 else 0.0
+                roi = ((portfolio_metrics['total_sold'] - portfolio_metrics['total_bought']) / \
+                    portfolio_metrics['total_bought'] * 100.0) \
+                    if portfolio_metrics['total_bought'] > 0 else 0.0
+                avg_holding_time = (portfolio_metrics['total_holding_time_hours'] / \
+                    portfolio_metrics['trade_count']) \
+                    if portfolio_metrics['trade_count'] > 0 else 0.0
+                
+                # Get first and last transaction timestamps
+                first_txn = min(wallet_raw_txns, key=lambda x: x['timestamp'])
+                last_txn = max(wallet_raw_txns, key=lambda x: x['timestamp'])
+                
+                # Create portfolio record (one per wallet)
+                portfolio_record = {
+                    'wallet_address': wallet_address,
+                    'token_address': 'ALL_TOKENS',  # Portfolio aggregate marker
+                    'calculation_date': current_time.date(),
+                    'realized_pnl': portfolio_metrics['realized_pnl'],
+                    'unrealized_pnl': portfolio_metrics['unrealized_pnl'],
+                    'total_pnl': total_pnl,
+                    'trade_count': portfolio_metrics['trade_count'],
+                    'win_rate': win_rate,
+                    'total_bought': portfolio_metrics['total_bought'],
+                    'total_sold': portfolio_metrics['total_sold'],
+                    'roi': roi,
+                    'avg_holding_time_hours': avg_holding_time,
+                    'avg_transaction_amount_usd': (portfolio_metrics['total_bought'] + \
+                        portfolio_metrics['total_sold']) / (portfolio_metrics['trade_count'] * 2) \
+                        if portfolio_metrics['trade_count'] > 0 else 0.0,
+                    'trade_frequency_daily': portfolio_metrics['trade_count'] / \
+                        max(1, (last_txn['timestamp'] - first_txn['timestamp']).total_seconds() / 86400),
+                    'first_transaction': first_txn['timestamp'],
+                    'last_transaction': last_txn['timestamp'],
+                    'current_position_tokens': 0.0,  # Aggregated across all tokens
+                    'current_position_cost_basis': portfolio_metrics['current_position_cost_basis'],
+                    'current_position_value': 0.0,  # Would need current prices
+                    'processed_at': current_time,
+                    'batch_id': batch_id,
+                    'data_source': 'birdeye_v3'
+                }
+                
+                portfolio_results.append(portfolio_record)
+                wallets_processed += 1
+                
+                if wallets_processed % 10 == 0:
+                    logger.info(f"Processed {wallets_processed} wallets...")
             
-            # Combine all timeframe results
-            if all_results:
-                token_level_pnl = all_results[0]
-                for df in all_results[1:]:
-                    token_level_pnl = token_level_pnl.unionAll(df)
+            # Convert results to DataFrame and write to silver layer
+            if portfolio_results:
+                logger.info(f"Writing {len(portfolio_results)} portfolio records to silver layer")
                 
-                # Calculate portfolio-level PnL (aggregate by wallet and timeframe)
-                portfolio_agg = token_level_pnl.groupBy("wallet_address", "time_period").agg(
-                    spark_sum("realized_pnl").alias("realized_pnl"),
-                    spark_sum("unrealized_pnl").alias("unrealized_pnl"),
-                    spark_sum("total_pnl").alias("total_pnl"),
-                    spark_sum("trade_count").alias("trade_count"),
-                    spark_sum("total_bought").alias("total_bought"),
-                    spark_sum("total_sold").alias("total_sold"),
-                    avg("avg_holding_time_hours").alias("avg_holding_time_hours"),
-                    avg("avg_transaction_amount_usd").alias("avg_transaction_amount_usd"),
-                    avg("trade_frequency_daily").alias("trade_frequency_daily"),
-                    spark_min("first_transaction").alias("first_transaction"),
-                    spark_max("last_transaction").alias("last_transaction"),
-                    spark_sum("current_position_tokens").alias("current_position_tokens"),
-                    spark_sum("current_position_cost_basis").alias("current_position_cost_basis"),
-                    spark_sum("current_position_value").alias("current_position_value"),
-                    spark_max("calculation_date").alias("calculation_date"),
-                    spark_max("processed_at").alias("processed_at"),
-                    spark_max("batch_id").alias("batch_id"),
-                    spark_max("data_source").alias("data_source")
-                )
+                # Define simplified schema for portfolio results (removed gold processing columns)
+                portfolio_schema = StructType([
+                    StructField("wallet_address", StringType(), False),
+                    StructField("token_address", StringType(), False),
+                    StructField("calculation_date", DateType(), False),
+                    StructField("realized_pnl", DoubleType(), False),
+                    StructField("unrealized_pnl", DoubleType(), False),
+                    StructField("total_pnl", DoubleType(), False),
+                    StructField("trade_count", IntegerType(), False),
+                    StructField("win_rate", DoubleType(), False),
+                    StructField("total_bought", DoubleType(), False),
+                    StructField("total_sold", DoubleType(), False),
+                    StructField("roi", DoubleType(), False),
+                    StructField("avg_holding_time_hours", DoubleType(), False),
+                    StructField("avg_transaction_amount_usd", DoubleType(), False),
+                    StructField("trade_frequency_daily", DoubleType(), False),
+                    StructField("first_transaction", TimestampType(), True),
+                    StructField("last_transaction", TimestampType(), True),
+                    StructField("current_position_tokens", DoubleType(), False),
+                    StructField("current_position_cost_basis", DoubleType(), False),
+                    StructField("current_position_value", DoubleType(), False),
+                    StructField("processed_at", TimestampType(), False),
+                    StructField("batch_id", StringType(), False),
+                    StructField("data_source", StringType(), False)
+                ])
                 
-                # Create portfolio records
-                portfolio_results = portfolio_agg.select(
-                    col("wallet_address"),
-                    lit("ALL_TOKENS").alias("token_address"),
-                    col("calculation_date"),
-                    col("time_period"),
-                    col("realized_pnl"),
-                    col("unrealized_pnl"),
-                    col("total_pnl"),
-                    col("trade_count"),
-                    when(col("trade_count") > 0, 50.0).otherwise(0.0).alias("win_rate"),  # Simplified
-                    col("total_bought"),
-                    col("total_sold"),
-                    when(col("total_bought") > 0,
-                         (col("total_sold") - col("total_bought")) / col("total_bought") * 100.0
-                    ).otherwise(0.0).alias("roi"),
-                    coalesce(col("avg_holding_time_hours"), lit(0.0)).alias("avg_holding_time_hours"),
-                    coalesce(col("avg_transaction_amount_usd"), lit(0.0)).alias("avg_transaction_amount_usd"),
-                    coalesce(col("trade_frequency_daily"), lit(0.0)).alias("trade_frequency_daily"),
-                    col("first_transaction"),
-                    col("last_transaction"),
-                    col("current_position_tokens"),
-                    col("current_position_cost_basis"),
-                    col("current_position_value"),
-                    col("processed_at"),
-                    col("batch_id"),
-                    col("data_source"),
-                    lit(False).alias("processed_for_gold"),
-                    lit(None).cast("timestamp").alias("gold_processed_at"),
-                    lit("pending").alias("gold_processing_status"),
-                    lit(None).cast("string").alias("gold_batch_id")
-                )
+                # Create DataFrame from results with explicit schema
+                results_df = spark.createDataFrame(portfolio_results, schema=portfolio_schema)
                 
-                # Combine token and portfolio results
-                final_results = token_level_pnl.unionAll(portfolio_results)
-                
-                # Write to silver layer with partitioning
-                partitioned_df = final_results.withColumn(
+                # Add partitioning columns
+                partitioned_df = results_df.withColumn(
                     "calculation_year", expr("year(calculation_date)")
                 ).withColumn(
                     "calculation_month", expr("month(calculation_date)")
                 )
                 
+                # Write to silver layer
                 output_path = "s3a://solana-data/silver/wallet_pnl/"
                 
                 partitioned_df.write \
-                    .partitionBy("calculation_year", "calculation_month", "time_period") \
+                    .partitionBy("calculation_year", "calculation_month") \
                     .mode("append") \
                     .parquet(output_path)
                 
@@ -716,59 +828,28 @@ def silver_wallet_pnl_task(**context):
                 success_path = f"s3a://solana-data/silver/wallet_pnl/calculation_year={current_date.year}/calculation_month={current_date.month}/_SUCCESS_{batch_id}"
                 spark.createDataFrame([("success",)], ["status"]).coalesce(1).write.mode("overwrite").text(success_path)
                 
-                # Update bronze processing status
-                processed_hashes = clean_df.select("transaction_hash").distinct()
-                bronze_df_updated = bronze_df.join(
-                    processed_hashes.withColumn("was_processed", lit(True)), 
-                    on="transaction_hash", 
-                    how="left"
-                ).withColumn(
-                    "processed_for_pnl",
-                    when(col("was_processed") == True, True).otherwise(col("processed_for_pnl"))
-                ).withColumn(
-                    "pnl_processed_at",
-                    when(col("was_processed") == True, current_timestamp()).otherwise(col("pnl_processed_at"))
-                ).withColumn(
-                    "pnl_processing_status",
-                    when(col("was_processed") == True, "completed").otherwise(col("pnl_processing_status"))
-                ).drop("was_processed")
-                
-                # Write updated bronze data back to original location
-                bronze_df_updated.write \
-                    .partitionBy("date") \
-                    .mode("overwrite") \
-                    .parquet("s3a://solana-data/bronze/wallet_transactions/")
-                
-                unique_wallets = clean_df.select("wallet_address").distinct().count()
-                total_records = final_results.count()
-                
                 logger.info(f"PnL calculation completed successfully for batch {batch_id}")
-                logger.info(f"Processed {unique_wallets} wallets, generated {total_records} PnL records")
+                logger.info(f"Processed {wallets_processed} wallets with portfolio aggregation")
                 
                 return {
-                    "wallets_processed": unique_wallets,
-                    "total_pnl_records": total_records,
+                    "wallets_processed": wallets_processed,
+                    "total_pnl_records": len(portfolio_results),
                     "batch_id": batch_id,
                     "output_path": output_path,
                     "status": "success"
                 }
             else:
-                logger.info("No timeframe data to process")
+                logger.info("No portfolio results generated")
                 return {
                     "wallets_processed": 0,
                     "total_pnl_records": 0,
                     "batch_id": batch_id,
-                    "status": "no_timeframe_data"
+                    "status": "no_valid_data"
                 }
                 
         except Exception as e:
-            logger.warning(f"Could not read bronze data: {e}")
-            return {
-                "wallets_processed": 0,
-                "total_pnl_records": 0,
-                "batch_id": batch_id,
-                "status": "no_bronze_data"
-            }
+            logger.error(f"Failed to read bronze data: {e}")
+            raise
             
     except Exception as e:
         logger.error(f"Error in silver wallet PnL task: {e}")

@@ -390,7 +390,7 @@ Whale Wallets → BirdEye API → Bronze Transactions → PySpark PnL → Silver
 - **Wallet Analytics** (`s3://solana-data/silver/wallet_pnl/`):
   - Token-level PnL metrics with FIFO cost basis calculation
   - Portfolio-level aggregated performance analytics
-  - Multi-timeframe analysis (all/week/month/quarter periods)
+  - Comprehensive portfolio analysis (simplified from multi-timeframe approach)
 
 #### Bronze Wallet Transactions Layer
 
@@ -424,17 +424,17 @@ Bronze Token Whales → Filter Unfetched → BirdEye API → Transform → Bronz
 
 **PnL Features**:
 - **FIFO Cost Basis**: First-in-first-out lot tracking for accurate PnL calculation
-- **Multi-Timeframe Analysis**: all/week/month/quarter periods
+- **Comprehensive Analysis**: All-time portfolio performance (simplified from multi-timeframe)
 - **Token-Level Metrics**: Individual token performance per wallet
 - **Portfolio-Level Aggregation**: Combined metrics across all tokens
 - **Trading Analytics**: Win rate, ROI, holding time, trade frequency
 
-**Schema Structure** (23 comprehensive fields):
+**Schema Structure** (22 comprehensive fields) - **SIMPLIFIED JUNE 2025**:
 - **Core PnL**: realized_pnl, unrealized_pnl, total_pnl
 - **Trading Metrics**: trade_count, win_rate, total_bought, total_sold, roi
 - **Position Data**: current_position_tokens, current_position_cost_basis, current_position_value
 - **Time Analytics**: avg_holding_time_hours, trade_frequency_daily
-- **Processing Metadata**: calculation_date, time_period, batch_id, processed_at
+- **Processing Metadata**: calculation_date, batch_id, processed_at
 
 **Data Flow**:
 ```
@@ -444,7 +444,7 @@ Update Bronze Processing Status (processed_for_pnl = true)
 ```
 
 **Output Structure**:
-- **Token-Level PnL**: `s3://solana-data/silver/wallet_pnl/` (partitioned by year/month/timeframe)
+- **Token-Level PnL**: `s3://solana-data/silver/wallet_pnl/` (partitioned by year/month)
 - **Portfolio-Level PnL**: Same location with `token_address = "ALL_TOKENS"`
 - **Processing Efficiency**: Handles unprocessed transactions only
 - **Success Markers**: `_SUCCESS_BATCH_ID` files for monitoring
@@ -452,7 +452,7 @@ Update Bronze Processing Status (processed_for_pnl = true)
 **Key Files**:
 - DAG: `dags/silver_wallet_pnl_dag.py`
 - UDF Implementation: FIFO cost basis calculation with lot tracking
-- Output: `s3://solana-data/silver/wallet_pnl/calculation_year=YYYY/calculation_month=MM/time_period=PERIOD/`
+- Output: `s3://solana-data/silver/wallet_pnl/calculation_year=YYYY/calculation_month=MM/`
 
 ### DuckDB Schema Structure
 
@@ -519,7 +519,7 @@ claude_pipeline:
 **Purpose**: Transforms silver wallet PnL data into qualified smart traders using configurable criteria
 
 **Filtering Criteria** (matching `dags/config/smart_trader_config.py`):
-- **Portfolio-level records**: `token_address = 'ALL_TOKENS'` and `time_period = 'all'`
+- **Portfolio-level records**: `token_address = 'ALL_TOKENS'` (simplified schema)
 - **Minimum PnL**: `total_pnl >= 10.0` (configurable)
 - **Minimum ROI**: `roi >= 1.0%` (configurable)
 - **Minimum Win Rate**: `win_rate >= 40.0%` (configurable)
@@ -588,6 +588,28 @@ cd dags && python3 -c "from config.webhook_config import BRONZE_BATCH_SIZE_LIMIT
 - ✅ **No hardcoded values** in DAG task modules
 - ✅ **Easy production tuning** for scaling and performance optimization
 - ✅ **Helper functions** for S3 paths, Spark configs, and processing status fields
+
+## 🔧 Recent Schema Improvements (June 2025)
+
+### Silver Layer PnL Schema Simplification
+
+**Problem**: The silver wallet PnL layer had schema conflicts with gold transformations due to:
+- Unnecessary `time_period` column (fixed as 'all')
+- Gold processing metadata columns causing read conflicts
+- Complex 3-level partitioning scheme
+
+**Solution Implemented**:
+- ✅ **Reduced schema from 27 to 22 columns** - Removed unnecessary metadata
+- ✅ **Eliminated `time_period` column** - Simplified to comprehensive analysis only
+- ✅ **Removed gold processing tracking** - No longer needed with simplified approach
+- ✅ **Updated partitioning to 2-level** - `year/month` only (removed timeframe partition)
+- ✅ **Updated both PySpark and dbt transformations** - Consistent schema handling
+
+**Benefits**:
+- 🚀 **Cleaner data flow** - Silver → Gold transformations without conflicts
+- 📊 **Simplified maintenance** - Fewer columns to manage and track
+- ⚡ **Better performance** - Reduced partitioning overhead
+- 🔧 **Easier debugging** - Clear separation of concerns between layers
 
 ## Pipeline-Specific Commands
 

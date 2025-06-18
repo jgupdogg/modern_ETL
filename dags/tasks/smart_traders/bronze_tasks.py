@@ -469,49 +469,51 @@ def fetch_bronze_token_whales(**context):
 # (TransactionConfig now uses imported constants from config.smart_trader_config)
 
 
-def get_transaction_schema() -> pa.Schema:
-    """Get PyArrow schema for wallet transaction data"""
+
+
+def get_raw_transaction_schema() -> pa.Schema:
+    """Get PyArrow schema for raw wallet transaction data (new approach - stores raw swap data)"""
     return pa.schema([
-        # Wallet & Token identification
+        # Core identification
         pa.field("wallet_address", pa.string(), nullable=False),
-        pa.field("token_address", pa.string(), nullable=False),
-        pa.field("transaction_hash", pa.string(), nullable=False),
+        pa.field("transaction_hash", pa.string(), nullable=False), 
+        pa.field("timestamp", pa.timestamp('us', tz='UTC'), nullable=False),
+        
+        # Raw API response - Base token
+        pa.field("base_symbol", pa.string(), nullable=True),
+        pa.field("base_address", pa.string(), nullable=True),
+        pa.field("base_type_swap", pa.string(), nullable=True),  # "from" or "to"
+        pa.field("base_ui_change_amount", pa.float64(), nullable=True),
+        pa.field("base_nearest_price", pa.float64(), nullable=True),
+        pa.field("base_decimals", pa.int32(), nullable=True),
+        pa.field("base_ui_amount", pa.float64(), nullable=True),
+        pa.field("base_change_amount", pa.string(), nullable=True),  # Raw amount as string
+        
+        # Raw API response - Quote token  
+        pa.field("quote_symbol", pa.string(), nullable=True),
+        pa.field("quote_address", pa.string(), nullable=True),
+        pa.field("quote_type_swap", pa.string(), nullable=True),  # "from" or "to"
+        pa.field("quote_ui_change_amount", pa.float64(), nullable=True),
+        pa.field("quote_nearest_price", pa.float64(), nullable=True),
+        pa.field("quote_decimals", pa.int32(), nullable=True),
+        pa.field("quote_ui_amount", pa.float64(), nullable=True),
+        pa.field("quote_change_amount", pa.string(), nullable=True),  # Raw amount as string
         
         # Transaction metadata
         pa.field("source", pa.string(), nullable=True),  # DEX source
+        pa.field("tx_type", pa.string(), nullable=True),  # "swap", "transfer"
         pa.field("block_unix_time", pa.int64(), nullable=True),
-        pa.field("tx_type", pa.string(), nullable=True),  # swap, transfer, etc
-        pa.field("timestamp", pa.timestamp('us', tz='UTC'), nullable=False),
-        pa.field("transaction_type", pa.string(), nullable=True),  # BUY/SELL/UNKNOWN
+        pa.field("owner", pa.string(), nullable=True),  # API owner field
         
-        # From token details
-        pa.field("from_symbol", pa.string(), nullable=True),
-        pa.field("from_address", pa.string(), nullable=True),
-        pa.field("from_decimals", pa.int32(), nullable=True),
-        pa.field("from_amount", pa.float64(), nullable=True),
-        pa.field("from_raw_amount", pa.string(), nullable=True),
-        
-        # To token details
-        pa.field("to_symbol", pa.string(), nullable=True),
-        pa.field("to_address", pa.string(), nullable=True),
-        pa.field("to_decimals", pa.int32(), nullable=True),
-        pa.field("to_amount", pa.float64(), nullable=True),
-        pa.field("to_raw_amount", pa.string(), nullable=True),
-        
-        # Pricing and value
-        pa.field("base_price", pa.float64(), nullable=True),
-        pa.field("quote_price", pa.float64(), nullable=True),
-        pa.field("value_usd", pa.float64(), nullable=True),
-        
-        # PnL processing fields (for future use)
+        # Processing state tracking
         pa.field("processed_for_pnl", pa.bool_(), nullable=False),  # Default: False
         pa.field("pnl_processed_at", pa.timestamp('us', tz='UTC'), nullable=True),
-        pa.field("pnl_processing_status", pa.string(), nullable=True),  # pending/completed/failed
+        pa.field("pnl_processing_batch_id", pa.string(), nullable=True),
         
         # Metadata
         pa.field("fetched_at", pa.timestamp('us', tz='UTC'), nullable=False),
         pa.field("batch_id", pa.string(), nullable=False),
-        pa.field("data_source", pa.string(), nullable=False),  # 'birdeye_v3'
+        pa.field("data_source", pa.string(), nullable=False)  # "birdeye_v3", "migration"
     ])
 
 
@@ -579,9 +581,14 @@ def read_unfetched_whales(batch_limit: int) -> pd.DataFrame:
     return result
 
 
-def transform_trade(trade: Dict[str, Any], wallet_address: str, token_address: str, 
-                   fetched_at: pd.Timestamp) -> Optional[Dict[str, Any]]:
-    """Transform raw API trade data from new /trader/txs/seek_by_time endpoint to our schema"""
+
+
+def transform_trade_raw(trade: Dict[str, Any], wallet_address: str, 
+                       fetched_at: pd.Timestamp) -> Optional[Dict[str, Any]]:
+    """
+    Transform raw API trade data to raw bronze schema (new approach)
+    Stores complete swap data without interpretation or filtering
+    """
     tx_hash = trade.get('tx_hash', '')
     if not tx_hash:
         return None
@@ -590,69 +597,9 @@ def transform_trade(trade: Dict[str, Any], wallet_address: str, token_address: s
     if trade.get('owner') != wallet_address:
         return None
     
-    # Get base and quote token info from new API schema
+    # Get base and quote token info from API response
     base = trade.get('base', {})
     quote = trade.get('quote', {})
-    
-    # Determine transaction direction using type_swap fields
-    # type_swap: "from" means outgoing, "to" means incoming
-    base_type_swap = base.get('type_swap', '')
-    quote_type_swap = quote.get('type_swap', '')
-    
-    # Determine from/to tokens based on type_swap
-    if base_type_swap == 'from' and quote_type_swap == 'to':
-        # Swapping base token for quote token (base -> quote)
-        from_token = base
-        to_token = quote
-    elif base_type_swap == 'to' and quote_type_swap == 'from':
-        # Swapping quote token for base token (quote -> base)
-        from_token = quote
-        to_token = base
-    else:
-        # Fallback: use change_amount signs to determine direction
-        base_change = base.get('change_amount', 0)
-        quote_change = quote.get('change_amount', 0)
-        
-        if base_change < 0 and quote_change > 0:
-            # Base decreased, quote increased (base -> quote)
-            from_token = base
-            to_token = quote
-        elif base_change > 0 and quote_change < 0:
-            # Base increased, quote decreased (quote -> base)
-            from_token = quote
-            to_token = base
-        else:
-            # Can't determine direction, skip this transaction
-            return None
-    
-    # Determine transaction type relative to our target token
-    if token_address == to_token.get('address'):
-        transaction_type = 'BUY'  # Acquiring the target token
-    elif token_address == from_token.get('address'):
-        transaction_type = 'SELL'  # Disposing of the target token
-    else:
-        transaction_type = 'UNKNOWN'  # Neither token matches our target
-    
-    # Calculate value in USD using nearest_price
-    value_usd = None
-    if token_address == base.get('address'):
-        # Our target token is the base token
-        price = base.get('nearest_price', trade.get('base_price'))
-        amount = abs(base.get('ui_change_amount', base.get('ui_amount', 0)))
-        if price and amount:
-            try:
-                value_usd = float(amount) * float(price)
-            except (ValueError, TypeError):
-                pass
-    elif token_address == quote.get('address'):
-        # Our target token is the quote token
-        price = quote.get('nearest_price', trade.get('quote_price'))
-        amount = abs(quote.get('ui_change_amount', quote.get('ui_amount', 0)))
-        if price and amount:
-            try:
-                value_usd = float(amount) * float(price)
-            except (ValueError, TypeError):
-                pass
     
     # Create timestamp from block_unix_time
     trade_timestamp = fetched_at
@@ -662,42 +609,43 @@ def transform_trade(trade: Dict[str, Any], wallet_address: str, token_address: s
         except (ValueError, TypeError):
             pass
     
+    # Store RAW data without any interpretation
     return {
-        # Identification
+        # Core identification
         "wallet_address": wallet_address,
-        "token_address": token_address,
         "transaction_hash": tx_hash,
-        
-        # Transaction metadata
-        "source": trade.get('source', ''),
-        "block_unix_time": trade.get('block_unix_time'),  # Fixed field name
-        "tx_type": trade.get('tx_type', ''),  # Fixed field name
         "timestamp": trade_timestamp,
-        "transaction_type": transaction_type,
         
-        # From token details (token being sold/sent)
-        "from_symbol": from_token.get('symbol', ''),
-        "from_address": from_token.get('address', ''),
-        "from_decimals": from_token.get('decimals'),
-        "from_amount": abs(from_token.get('ui_change_amount', from_token.get('ui_amount', 0))),  # Use absolute value of change
-        "from_raw_amount": str(abs(from_token.get('change_amount', from_token.get('amount', 0)))),
+        # Raw API response - Base token (preserve all fields as-is)
+        "base_symbol": base.get('symbol'),
+        "base_address": base.get('address'),
+        "base_type_swap": base.get('type_swap'),  # "from" or "to" - no interpretation
+        "base_ui_change_amount": base.get('ui_change_amount'),  # Keep negative/positive as-is
+        "base_nearest_price": base.get('nearest_price'),
+        "base_decimals": base.get('decimals'),
+        "base_ui_amount": base.get('ui_amount'),
+        "base_change_amount": str(base.get('change_amount', '')),  # Raw amount as string
         
-        # To token details (token being bought/received)
-        "to_symbol": to_token.get('symbol', ''),
-        "to_address": to_token.get('address', ''),
-        "to_decimals": to_token.get('decimals'),
-        "to_amount": abs(to_token.get('ui_change_amount', to_token.get('ui_amount', 0))),  # Use absolute value of change
-        "to_raw_amount": str(abs(to_token.get('change_amount', to_token.get('amount', 0)))),
+        # Raw API response - Quote token (preserve all fields as-is)
+        "quote_symbol": quote.get('symbol'),
+        "quote_address": quote.get('address'),
+        "quote_type_swap": quote.get('type_swap'),  # "from" or "to" - no interpretation
+        "quote_ui_change_amount": quote.get('ui_change_amount'),  # Keep negative/positive as-is
+        "quote_nearest_price": quote.get('nearest_price'),
+        "quote_decimals": quote.get('decimals'),
+        "quote_ui_amount": quote.get('ui_amount'),
+        "quote_change_amount": str(quote.get('change_amount', '')),  # Raw amount as string
         
-        # Pricing and value
-        "base_price": trade.get('base_price'),  # Fixed field name
-        "quote_price": trade.get('quote_price'),  # Fixed field name
-        "value_usd": value_usd,
+        # Transaction metadata (preserve as-is)
+        "source": trade.get('source'),
+        "tx_type": trade.get('tx_type'),
+        "block_unix_time": trade.get('block_unix_time'),
+        "owner": trade.get('owner'),  # Store owner field from API
         
-        # PnL processing fields
-        "processed_for_pnl": False,
+        # Processing state tracking (defaults for new records)
+        "processed_for_pnl": False,  # Will be processed by silver layer
         "pnl_processed_at": None,
-        "pnl_processing_status": "pending",
+        "pnl_processing_batch_id": None,
         
         # Metadata
         "fetched_at": fetched_at,
@@ -707,58 +655,59 @@ def transform_trade(trade: Dict[str, Any], wallet_address: str, token_address: s
 
 def fetch_bronze_wallet_transactions(**context):
     """
-    Fetch transaction history for whale wallets from BirdEye API and store in MinIO bronze layer
+    Fetch transaction history for whale wallets and store as RAW data (uses raw approach)
     
-    Extracted from bronze_wallet_transactions_dag.py
+    Extracted from bronze_wallet_transactions_dag.py - now using raw data storage
     """
     logger = logging.getLogger(__name__)
     
-    # Configuration now uses centralized config
-    
-    # Try to get API key from Airflow Variable first, then environment
-    from airflow.models import Variable
-    try:
-        api_key = Variable.get('BIRDSEYE_API_KEY')
-        logger.info("Using BIRDSEYE_API_KEY from Airflow Variable")
-    except:
-        api_key = os.environ.get('BIRDSEYE_API_KEY')
-        if api_key:
-            logger.info("Using BIRDSEYE_API_KEY from environment")
-        
-    if not api_key:
-        raise ValueError("BIRDSEYE_API_KEY not found in Airflow Variables or environment")
-    
-    # Initialize clients
-    birdeye_client = BirdEyeAPIClient(api_key)
-    s3_client = get_minio_client()
-    
-    # Get unfetched whale wallets
-    logger.info(f"Reading unfetched whale wallets...")
-    whales_df = read_unfetched_whales(BRONZE_WALLET_BATCH_LIMIT)
-    
-    if whales_df.empty:
-        logger.info("No unfetched whale wallets found")
-        return {
-            "wallets_processed": 0,
-            "transactions_fetched": 0,
-            "errors": 0
-        }
-    
-    logger.info(f"Found {len(whales_df)} whale wallets to process")
-    
-    # Process each wallet
-    all_transactions = []
-    wallets_processed = 0
-    errors = 0
+    # Generate batch ID
     batch_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     fetched_at = pd.Timestamp.utcnow()
     
-    for _, whale_row in whales_df.iterrows():
-        wallet_address = whale_row['wallet_address']
-        token_address = whale_row['token_address']
-        token_symbol = whale_row.get('token_symbol', token_address[:8])
+    logger.info(f"Starting raw bronze wallet transactions fetch - batch {batch_id}")
+    
+    # Read whale data (but don't filter by token)
+    whales_df = read_unfetched_whales(BRONZE_WALLET_BATCH_LIMIT)
+    
+    if whales_df.empty:
+        logger.info("No unfetched whales found")
+        return {"wallets_processed": 0, "transactions_fetched": 0, "errors": 0}
+    
+    # Get unique wallets (removing token_address constraint)
+    unique_wallets = whales_df['wallet_address'].drop_duplicates()
+    logger.info(f"Processing {len(unique_wallets)} unique wallet addresses")
+    
+    # Initialize BirdEye client
+    try:
+        # Try to get API key from Airflow Variable first, then environment
+        from airflow.models import Variable
+        try:
+            api_key = Variable.get('BIRDSEYE_API_KEY')
+            logger.info("Using BIRDSEYE_API_KEY from Airflow Variable")
+        except:
+            api_key = os.environ.get('BIRDSEYE_API_KEY')
+            if api_key:
+                logger.info("Using BIRDSEYE_API_KEY from environment")
         
-        logger.info(f"Fetching transactions for wallet {wallet_address[:10]}... token {token_symbol}")
+        if not api_key:
+            raise ValueError("BIRDSEYE_API_KEY not found in Airflow Variables or environment")
+        
+        birdeye_client = BirdEyeAPIClient(api_key)
+    except Exception as e:
+        logger.error(f"Failed to initialize BirdEye client: {e}")
+        raise
+    
+    # Initialize MinIO client
+    s3_client = get_minio_client()
+    
+    all_transactions = []
+    wallets_processed = 0
+    errors = 0
+    
+    # Process each unique wallet (no token filtering)
+    for wallet_address in unique_wallets:
+        logger.info(f"Fetching transactions for wallet {wallet_address[:10]}...")
         
         try:
             # Fetch wallet transactions from BirdEye API
@@ -777,22 +726,13 @@ def fetch_bronze_wallet_transactions(**context):
                     trades = response['data'].get('items', response['data'].get('trades', []))
             
         except Exception as e:
-            logger.error(f"CRITICAL: BirdEye API error for wallet {wallet_address[:10]}...: {e}")
-            import traceback
-            logger.error(f"Full traceback: {traceback.format_exc()}")
-            trades = []  # Continue with empty trades - NO MOCK DATA
-        
-        # If no trades from API or API failed, STOP using mock data and log the issue
-        if not trades:
-            logger.error(f"CRITICAL: No trades returned for wallet {wallet_address[:10]}... - BirdEye API failed")
-            logger.error(f"Wallet: {wallet_address}, Token: {token_symbol}")
-            logger.error("This means PnL calculations will be incomplete or fail")
-            # DO NOT CREATE MOCK DATA - this was hiding the real problem
+            logger.error(f"BirdEye API error for wallet {wallet_address[:10]}...: {e}")
+            errors += 1
             trades = []
         
-        # Transform trades to our schema
+        # Transform trades using RAW transformation (no token filtering)
         for trade in trades:
-            transformed = transform_trade(trade, wallet_address, token_address, fetched_at)
+            transformed = transform_trade_raw(trade, wallet_address, fetched_at)
             if transformed:
                 transformed['batch_id'] = batch_id
                 all_transactions.append(transformed)
@@ -801,18 +741,18 @@ def fetch_bronze_wallet_transactions(**context):
         logger.info(f"Fetched {len(trades)} transactions for wallet {wallet_address[:10]}...")
         
         # Rate limiting
-        if _ < len(whales_df) - 1:  # Don't sleep after last wallet
+        if wallet_address != unique_wallets.iloc[-1]:  # Don't sleep after last wallet
             time.sleep(WALLET_API_DELAY)
     
     # Convert to DataFrame and save to MinIO
     if all_transactions:
-        logger.info(f"Processing {len(all_transactions)} total transactions")
+        logger.info(f"Processing {len(all_transactions)} total raw transactions")
         
         # Create DataFrame
         transactions_df = pd.DataFrame(all_transactions)
         
-        # Ensure all columns from schema exist
-        schema = get_transaction_schema()
+        # Ensure all columns from raw schema exist
+        schema = get_raw_transaction_schema()
         for field in schema:
             if field.name not in transactions_df.columns:
                 transactions_df[field.name] = None
@@ -823,7 +763,7 @@ def fetch_bronze_wallet_transactions(**context):
         # Convert to PyArrow table with schema
         table = pa.Table.from_pandas(transactions_df, schema=schema)
         
-        # Prepare MinIO path
+        # Prepare MinIO path for RAW data
         date_partition = datetime.utcnow().strftime("date=%Y-%m-%d")
         file_name = f"wallet_transactions_{batch_id}.parquet"
         s3_key = f"bronze/wallet_transactions/{date_partition}/{file_name}"
@@ -839,7 +779,7 @@ def fetch_bronze_wallet_transactions(**context):
                 Key=s3_key,
                 Body=buffer.getvalue()
             )
-            logger.info(f"Successfully wrote {len(transactions_df)} transactions to s3://solana-data/{s3_key}")
+            logger.info(f"Successfully wrote {len(transactions_df)} raw transactions to s3://solana-data/{s3_key}")
             
             # Write success marker
             success_key = f"bronze/wallet_transactions/{date_partition}/_SUCCESS"
@@ -852,8 +792,10 @@ def fetch_bronze_wallet_transactions(**context):
             # Write processing status file
             status_data = {
                 "batch_id": batch_id,
-                "processed_wallets": whales_df[['wallet_address', 'token_address']].to_dict('records'),
-                "timestamp": fetched_at.isoformat()
+                "processed_wallets": list(unique_wallets),
+                "total_transactions": len(all_transactions),
+                "timestamp": fetched_at.isoformat(),
+                "schema_version": "raw_v1"
             }
             status_key = f"bronze/wallet_transactions/{date_partition}/status_{batch_id}.json"
             s3_client.put_object(
@@ -863,8 +805,10 @@ def fetch_bronze_wallet_transactions(**context):
             )
             
         except Exception as e:
-            logger.error(f"Error writing to MinIO: {e}")
+            logger.error(f"Error writing raw data to MinIO: {e}")
             raise
+    else:
+        logger.warning("No transactions fetched")
     
     # Return metadata
     return {
@@ -872,5 +816,6 @@ def fetch_bronze_wallet_transactions(**context):
         "transactions_fetched": len(all_transactions),
         "errors": errors,
         "s3_path": f"s3://solana-data/{s3_key}" if all_transactions else None,
-        "batch_id": batch_id
+        "batch_id": batch_id,
+        "total_transactions_saved": len(all_transactions)
     }
