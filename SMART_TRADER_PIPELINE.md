@@ -28,11 +28,18 @@ The Smart Trader Identification Pipeline is a **fully validated, production-read
 4. **✅ Minimal Logging System**: Comprehensive error categorization and success metrics
 5. **✅ Complete Data Flow**: Validated bronze → silver → gold → helius integration
 
-## Pipeline Architecture
+## Pipeline Architecture & Technology Stack
 
 ```
-Bronze Layer → Silver Layer → Gold Layer → Helius Webhook Integration
+🐍 Bronze Layer → 🚀 Silver Layer → 🦆 Gold Layer → 🌐 Helius Integration
+  (Python)        (PySpark)      (dbt+DuckDB)    (Python API)
 ```
+
+### Technology Summary by Layer:
+- **Bronze**: 🐍 Python + Pandas + PyArrow + BirdEye API → Parquet
+- **Silver**: 🚀 PySpark + Custom FIFO UDF + S3A → Enhanced Analytics  
+- **Gold**: 🦆 dbt + DuckDB + SQL Models → Smart Trader Identification
+- **Integration**: 🌐 Python + Requests → Helius Real-time Monitoring
 
 ### Validated Data Flow
 ```
@@ -51,47 +58,107 @@ BirdEye API → Token List → Token Whales → Wallet Transactions → PnL Calc
 - **gold_top_traders**: 8.7s execution time ✅ **FIXED**
 - **helius_webhook_update**: 0.6s execution time
 
-## Data Layers Overview
+## Data Layers Overview & Technologies
 
 ### Bronze Layer (Raw Data Ingestion)
 **Location**: `s3://solana-data/bronze/`  
+**Technologies**: 🐍 **Python + Pandas + PyArrow + Boto3**  
+**Processing**: API ingestion and parquet transformation  
 **Status**: ✅ **OPTIMIZED & VALIDATED**
 
-#### Active Datasets (2 total)
+#### Technology Stack:
+- **🌐 API Client**: Custom BirdEye client (`birdeye_client/`)
+- **📊 Data Processing**: Pandas DataFrames for in-memory operations
+- **💾 Storage Format**: PyArrow + Parquet with Snappy compression  
+- **☁️ Storage Backend**: Boto3 → MinIO (S3-compatible)
+- **🔧 Schema Management**: PyArrow schema validation and enforcement
 
-**1. Token Whales** (`token_whales/`)
-- **API Source**: BirdEye V3 API top holders endpoint ✅ **WORKING**
+#### Bronze Tasks & Technologies:
+
+**Task 1: `bronze_token_list`** (`bronze_tasks.py:fetch_bronze_token_list`)
+- **Technology**: 🐍 Python + Pandas + PyArrow
+- **API**: BirdEye V3 token list with pagination
+- **Processing**: Filters by liquidity, volume, price change criteria
+- **Output**: Parquet files with token metadata
+
+**Task 3: `bronze_token_whales`** (`bronze_tasks.py:fetch_bronze_token_whales`)  
+- **Technology**: 🐍 Python + Pandas + PyArrow
+- **API**: BirdEye V3 top holders endpoint
+- **Processing**: Whale holder data with rank and holdings
+- **Output**: Date-partitioned parquet with processing state tracking
+
+**Task 4: `bronze_wallet_transactions`** (`bronze_tasks.py:fetch_bronze_wallet_transactions`)
+- **Technology**: 🐍 Python + Pandas + PyArrow  
+- **API**: BirdEye V3 `/trader/txs/seek_by_time` ✅ **FIXED ENDPOINT**
+- **Processing**: Raw transaction data storage with FIFO preparation
+- **Output**: Parquet with `processed_for_pnl` state flags
+
+#### Active Datasets (3 total)
+
+**1. Token List** (`token_list_v3/`)
+- **Source**: BirdEye V3 API token list endpoint ✅ **WORKING**
+- **Technology**: Pandas → PyArrow → Parquet
+- **Schema**: 15+ columns including price, volume, liquidity metrics
+- **Processing**: Centralized filtering via `smart_trader_config.py`
+
+**2. Token Whales** (`token_whales/`)
+- **Source**: BirdEye V3 API top holders endpoint ✅ **WORKING**
+- **Technology**: Pandas → PyArrow → Parquet
 - **Schema**: 19 columns including holdings, rank, processing status
 - **Partitioning**: ✅ Date partitioned (`date=YYYY-MM-DD`)
-- **Processing Status**: ✅ Validated with real whale data
 
-**2. Wallet Transactions** (`wallet_transactions/`)
-- **API Source**: BirdEye V3 API `/trader/txs/seek_by_time` ✅ **FIXED & WORKING**
+**3. Wallet Transactions** (`wallet_transactions/`)
+- **Source**: BirdEye V3 API `/trader/txs/seek_by_time` ✅ **FIXED & WORKING**
+- **Technology**: Pandas → PyArrow → Parquet (Status: Parquet instead of JSON)
 - **Schema**: 28 columns including transaction details, PnL processing flags
-- **Data Quality**: ✅ **3,135 real transactions processed** (43.4% UNKNOWN is correct)
-- **Processing**: ✅ Proper state tracking (`processed_for_pnl` flags)
+- **Data Quality**: ✅ **3,135+ real transactions processed**
 
 ### Silver Layer (Transformed Analytics)
 **Location**: `s3://solana-data/silver/`  
-**Technology**: PySpark with **Enhanced FIFO** cost basis calculation  
+**Technologies**: 🚀 **PySpark + Custom UDF Functions + MinIO S3A**  
+**Processing**: Advanced FIFO cost basis calculation and analytics  
 **Status**: ✅ **OPTIMIZED & VALIDATED**
+
+#### Technology Stack:
+- **⚡ Processing Engine**: PySpark 3.5.0 with S3A integration
+- **🧮 Custom Logic**: Enhanced FIFO UDF for cost basis calculations
+- **📊 Data Transformations**: Complex aggregations and window functions
+- **💾 Storage**: Direct S3A write to MinIO with partitioning
+- **🔧 Schema Evolution**: Handles mixed data types with casting
+
+#### Silver Tasks & Technologies:
+
+**Task 2: `silver_tracked_tokens`** (`silver_tasks.py:transform_silver_tracked_tokens`)
+- **Technology**: 🐍 Python + Pandas + PyArrow
+- **Processing**: Token performance filtering and quality scoring
+- **Logic**: Momentum-based filtering with configurable thresholds
+- **Output**: High-performance token list for whale analysis
+
+**Task 5: `silver_wallet_pnl_task`** (`smart_trader_identification_dag.py:@task`)
+- **Technology**: 🚀 **PySpark with Custom FIFO UDF**
+- **Processing**: Advanced cost basis calculation using FIFO methodology
+- **Features**: Handles complex scenarios (SELL-before-BUY, partial matching)
+- **Memory**: 2GB driver/executor for large-scale processing
+- **Output**: Portfolio-level PnL metrics with comprehensive analytics
 
 #### Active Datasets (2 total)
 
 **1. Tracked Tokens** (`tracked_tokens/`)
+- **Technology**: Pandas → PyArrow → Parquet
 - **Purpose**: Filtered high-performance tokens based on momentum criteria
 - **Schema**: 19 columns including performance metrics and quality scoring
 - **Status**: ✅ Filtering working correctly
 
 **2. Wallet PnL Metrics** (`wallet_pnl/`) - **SCHEMA SIMPLIFIED (June 2025)**
-- **Records**: ✅ **5,958 PnL records** validated in recent test
-- **Technology**: **Enhanced FIFO UDF** handles complex scenarios:
-  - SELL transactions before any BUY (negative inventory tracking)
-  - Partial matching scenarios
-  - Better price/value handling
-  - More accurate trade counting
-- **Schema**: **22 columns** (simplified from 27) - removed `time_period` and gold processing metadata
-- **Processing**: ✅ All portfolio-level records (token_address='ALL_TOKENS') available for gold layer
+- **Technology**: 🚀 **PySpark Enhanced FIFO UDF → S3A Parquet**
+- **Records**: ✅ **5,958+ PnL records** validated in recent test
+- **Processing Features**: 
+  - SELL transactions before BUY (negative inventory tracking)
+  - Partial lot matching with FIFO queue management
+  - Portfolio-level aggregation (token_address='ALL_TOKENS')
+  - Schema evolution handling with `mergeSchema` option
+- **Schema**: **22 columns** (simplified from 27) - removed `time_period` partition
+- **Performance**: 2GB memory allocation, processes all available bronze data
 
 **Enhanced FIFO Features**:
 ```python
@@ -114,14 +181,32 @@ roi                            DOUBLE       -- Return on investment
 ```
 
 ### Gold Layer (Top Trader Selection)
-**Location**: `s3://solana-data/gold/top_traders/`  
-**Purpose**: Elite trader identification for monitoring  
-**Status**: ✅ **FIXED & VALIDATED**
+**Location**: `s3://solana-data/gold/smart_wallets/` + DuckDB table  
+**Technologies**: 🦆 **dbt + DuckDB + S3 Integration**  
+**Purpose**: Elite trader identification with cleaner SQL transformations  
+**Status**: ✅ **UPGRADED TO DBT & VALIDATED**
 
-#### Recent Fixes Applied
-- **✅ Spark Metadata Cache Issue**: Fixed `SparkFileNotFoundException` with `CLEAR CACHE`
-- **✅ Robust File Reading**: Changed to wildcard pattern `s3a://solana-data/silver/wallet_pnl/**/*.parquet`
-- **✅ Processing Validation**: Successfully processes 729 unprocessed portfolio records
+#### Technology Stack:
+- **🦆 Analytics Engine**: DuckDB with S3 httpfs extension
+- **📝 Transformation Logic**: dbt (data build tool) SQL models
+- **📊 Processing**: Pure SQL with performance tier classification
+- **💾 Storage**: DuckDB table + S3 parquet post-hook
+- **🔄 Schema**: Handles silver layer evolution gracefully
+
+#### Gold Tasks & Technologies:
+
+**Task 6: `gold_top_traders`** (`smart_trader_identification_dag.py:gold_top_traders_task`)
+- **Technology**: 🦆 **dbt + DuckDB + subprocess execution**
+- **Model**: `dbt/models/gold/smart_wallets.sql` 
+- **Processing**: SQL-based filtering and performance tier classification
+- **Features**: Smart trader scoring, profitability ranking, tier assignment
+- **Output**: DuckDB table + S3 parquet via post-hook
+
+#### Recent Upgrades (June 2025)
+- **✅ Switched from PySpark to dbt**: Cleaner SQL transformations
+- **✅ Schema Evolution Handling**: Robust silver layer data reading
+- **✅ Performance Tier Logic**: Elite/Strong/Promising classification
+- **✅ Direct S3 Output**: Post-hook writes to MinIO automatically
 
 #### Performance Criteria (Production Tuned)
 Based on real data analysis, updated thresholds:
@@ -136,9 +221,25 @@ Based on real data analysis, updated thresholds:
 - **Integration**: ✅ Connected to Helius webhook updates
 
 ### Helius Integration
+**Technologies**: 🌐 **Python + Requests + Pandas + MinIO Boto3**  
 **Purpose**: Real-time transaction monitoring for identified top traders  
 **Status**: ✅ **VALIDATED**
-**Process**: Updates webhook with profitable wallet addresses from gold layer  
+
+#### Technology Stack:
+- **🌐 HTTP Client**: Python Requests for Helius API integration
+- **📊 Data Reading**: Pandas for gold layer parquet processing
+- **☁️ Storage Access**: Boto3 for reading from MinIO gold layer
+- **🔧 Configuration**: Centralized webhook settings and API limits
+
+#### Helius Tasks & Technologies:
+
+**Task 7: `helius_webhook_update`** (`helius_tasks.py:update_helius_webhook`)
+- **Technology**: 🐍 **Python + Requests + Pandas**
+- **Processing**: Reads latest gold traders, formats for Helius API
+- **Features**: Performance tier prioritization, address limit handling
+- **Integration**: REST API calls to Helius webhook endpoints
+- **Output**: Real-time monitoring setup for profitable wallets
+
 **Result**: ✅ **0.6 seconds execution time**, live monitoring ready
 
 ## 🔧 Monitoring & Error Handling
@@ -278,13 +379,30 @@ SPARK_EXECUTOR_MEMORY = "2g"
 
 ## Technical Architecture
 
-### Validated Technology Stack
-- **Apache Airflow**: ✅ Workflow orchestration (7/7 tasks successful)
-- **PySpark**: ✅ Enhanced FIFO calculations (handles complex scenarios)
-- **MinIO**: ✅ S3-compatible storage (5,958 records processed)
-- **DuckDB**: ✅ Analytical queries and validation
-- **BirdEye API**: ✅ Fixed endpoint integration
-- **Helius API**: ✅ Webhook monitoring integration
+### Validated Technology Stack by Layer
+
+#### Bronze Layer Technologies:
+- **🐍 Python + Pandas + PyArrow**: API ingestion and data transformation
+- **🌐 Custom BirdEye Client**: Rate-limited API integration with pagination
+- **💾 Parquet + Snappy**: Efficient columnar storage with compression
+- **☁️ Boto3 + MinIO**: S3-compatible object storage
+
+#### Silver Layer Technologies:
+- **🚀 PySpark 3.5.0**: Large-scale distributed processing
+- **🧮 Custom FIFO UDF**: Advanced cost basis calculation algorithms
+- **📊 S3A Connector**: Direct MinIO integration for PySpark
+- **🔧 Schema Evolution**: Handles mixed data types with `mergeSchema`
+
+#### Gold Layer Technologies:
+- **🦆 dbt + DuckDB**: SQL-based transformations with analytics engine
+- **📝 SQL Models**: Clean, maintainable transformation logic
+- **🔄 S3 httpfs**: Direct parquet reading from MinIO
+- **📊 Post-hooks**: Automated S3 output generation
+
+#### Integration Technologies:
+- **🌐 Python Requests**: REST API integration for Helius
+- **⚙️ Apache Airflow**: Workflow orchestration (7/7 tasks successful)
+- **📋 Centralized Config**: Python-based configuration management
 
 ### Key Improvements Implemented
 - **Enhanced FIFO UDF**: Handles SELL-before-BUY, partial matching

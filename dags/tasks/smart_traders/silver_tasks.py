@@ -23,7 +23,7 @@ from config.smart_trader_config import (
     SILVER_MIN_VOLUME_MCAP_RATIO, SILVER_MIN_PRICE_CHANGE,
     SILVER_PNL_BATCH_LIMIT, PNL_TIMEFRAMES, PNL_WEEK_DAYS, PNL_MONTH_DAYS, PNL_QUARTER_DAYS,
     SOL_TOKEN_ADDRESS, MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, MINIO_BUCKET,
-    SILVER_TRACKED_TOKENS_PATH, SILVER_WALLET_PNL_PATH
+    SILVER_TRACKED_TOKENS_PATH, SILVER_WALLET_PNL_PATH, BRONZE_WALLET_TRANSACTIONS_PATH
 )
 
 
@@ -622,7 +622,7 @@ if PYSPARK_AVAILABLE:
         
         try:
             # Read only parquet files from bronze wallet transactions
-            parquet_path = "s3a://solana-data/bronze/wallet_transactions/*/wallet_transactions_*.parquet"
+            parquet_path = f"s3a://solana-data/{BRONZE_WALLET_TRANSACTIONS_PATH}/**/*.parquet"
             bronze_df = spark.read.parquet(parquet_path)
             
             logger.info(f"Read {bronze_df.count()} total bronze transactions")
@@ -912,7 +912,7 @@ if PYSPARK_AVAILABLE:
             logger.info(f"Updating processing status for {processed_hashes.count()} transactions")
             
             # Read current bronze data using parquet path pattern
-            parquet_path = "s3a://solana-data/bronze/wallet_transactions/*/wallet_transactions_*.parquet"
+            parquet_path = f"s3a://solana-data/{BRONZE_WALLET_TRANSACTIONS_PATH}/**/*.parquet"
             bronze_df = spark.read.parquet(parquet_path)
             
             # Update processing flags for processed transactions
@@ -936,7 +936,7 @@ if PYSPARK_AVAILABLE:
             updated_df.write \
                 .partitionBy("date") \
                 .mode("overwrite") \
-                .parquet("s3a://solana-data/bronze/wallet_transactions/")
+                .parquet(f"s3a://solana-data/{BRONZE_WALLET_TRANSACTIONS_PATH}/")
             
             logger.info("Successfully updated bronze layer processing status")
             

@@ -19,7 +19,12 @@ import sys
 sys.path.append('/opt/airflow/dags')
 
 # Import centralized configuration
-from config.smart_trader_config import get_spark_config
+from config.smart_trader_config import (
+    get_spark_config,
+    SILVER_PNL_RECENT_DAYS, SILVER_PNL_HISTORICAL_LIMIT, 
+    SILVER_PNL_MIN_TRANSACTIONS, PNL_AMOUNT_PRECISION_THRESHOLD,
+    PNL_BATCH_PROGRESS_INTERVAL, BRONZE_WALLET_TRANSACTIONS_PATH
+)
 
 def bronze_token_list_task(**context):
     """Task 1: Fetch token list from BirdEye API"""
@@ -333,10 +338,10 @@ def silver_wallet_pnl_task(**context):
     execution_date = context['logical_date']
     batch_id = execution_date.strftime("%Y%m%d_%H%M%S")
     
-    # Configuration for transaction filtering
-    RECENT_DAYS = 7  # Include all transactions from last N days
-    HISTORICAL_LIMIT = 100  # Maximum total transactions per wallet
-    MIN_TRANSACTIONS = 5  # Skip wallets with too few trades
+    # Configuration for transaction filtering (from centralized config)
+    RECENT_DAYS = SILVER_PNL_RECENT_DAYS  # Include all transactions from last N days
+    HISTORICAL_LIMIT = SILVER_PNL_HISTORICAL_LIMIT  # Maximum total transactions per wallet
+    MIN_TRANSACTIONS = SILVER_PNL_MIN_TRANSACTIONS  # Skip wallets with too few trades
     
     # Create Spark session with S3A/MinIO support using centralized config
     spark_config = get_spark_config()
@@ -562,7 +567,7 @@ def silver_wallet_pnl_task(**context):
                             buy_lot['amount'] -= sell_amount
                             buy_lot['cost_basis'] -= cost_basis_used
                             
-                            if buy_lot['amount'] <= 0.001:  # Almost zero, remove
+                            if buy_lot['amount'] <= PNL_AMOUNT_PRECISION_THRESHOLD:  # Almost zero, remove
                                 buy_lots.pop(0)
                             
                             sell_queue.pop(0)
@@ -596,7 +601,7 @@ def silver_wallet_pnl_task(**context):
                     remaining_to_sell = amount
                     
                     # Try to match against existing buy lots
-                    while remaining_to_sell > 0.001 and buy_lots:
+                    while remaining_to_sell > PNL_AMOUNT_PRECISION_THRESHOLD and buy_lots:
                         buy_lot = buy_lots[0]
                         
                         if buy_lot['amount'] <= remaining_to_sell:
@@ -636,7 +641,7 @@ def silver_wallet_pnl_task(**context):
                             remaining_to_sell = 0
                     
                     # If there's still remaining to sell, add to sell queue
-                    if remaining_to_sell > 0.001:
+                    if remaining_to_sell > PNL_AMOUNT_PRECISION_THRESHOLD:
                         sell_queue.append({
                             'amount': remaining_to_sell,
                             'price': sell_price,
@@ -678,8 +683,9 @@ def silver_wallet_pnl_task(**context):
     try:
         # Read raw bronze transactions
         try:
-            # Read ALL available bronze transaction data for comprehensive analysis
-            parquet_path = f"s3a://solana-data/bronze/wallet_transactions/*/wallet_transactions_*.parquet"
+            # Read ALL available CLEAN bronze transaction data for comprehensive analysis
+            # Exclude status files which have different schema (INT64 timestamp vs proper timestamp)
+            parquet_path = f"s3a://solana-data/{BRONZE_WALLET_TRANSACTIONS_PATH}/**/clean_*.parquet"
             
             bronze_df = spark.read.parquet(parquet_path)
             logger.info(f"Successfully read raw bronze data from all available dates")
@@ -840,7 +846,7 @@ def silver_wallet_pnl_task(**context):
                 portfolio_results.append(portfolio_record)
                 wallets_processed += 1
                 
-                if wallets_processed % 10 == 0:
+                if wallets_processed % PNL_BATCH_PROGRESS_INTERVAL == 0:
                     logger.info(f"Processed {wallets_processed} wallets...")
             
             # Convert results to DataFrame and write to silver layer

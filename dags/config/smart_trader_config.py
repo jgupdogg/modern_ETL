@@ -15,9 +15,9 @@ API_PAGINATION_LIMIT = 100           # Records per API call
 # Batch Processing Limits
 BRONZE_TOKEN_BATCH_LIMIT = 100       # Max tokens to fetch per run
 BRONZE_WHALE_BATCH_LIMIT = 50        # Max tokens to process for whales per run  
-BRONZE_WALLET_BATCH_LIMIT = 1000     # Max wallets to process per run (increased for full processing)
+BRONZE_WALLET_BATCH_LIMIT = 20     # Max wallets to process per run (increased for full processing)
 SILVER_PNL_BATCH_LIMIT = 10000       # Max wallets for PnL calculation per run (increased for full processing)
-GOLD_MAX_TRADERS_PER_BATCH = 100     # Max top traders per batch
+GOLD_MAX_TRADERS_PER_BATCH = 1000     # Max top traders per batch
 
 # =============================================================================
 # BRONZE LAYER FILTERS
@@ -32,7 +32,7 @@ MIN_PRICE_CHANGE_2H_PERCENT = 10     # Minimum 2-hour price change %
 MIN_PRICE_CHANGE_24H_PERCENT = 30    # Minimum 24-hour price change %
 
 # Whale Data Settings
-MAX_WHALES_PER_TOKEN = 20            # Top N holders to fetch per token
+MAX_WHALES_PER_TOKEN = 100            # Top N holders to fetch per token
 WHALE_REFRESH_DAYS = 7               # Re-fetch whale data if older than N days
 
 # Transaction History Settings  
@@ -56,6 +56,23 @@ PNL_MONTH_DAYS = 30
 PNL_QUARTER_DAYS = 90
 
 # =============================================================================
+# SILVER PNL PROCESSING LIMITS
+# =============================================================================
+
+# Transaction Selection Criteria
+SILVER_PNL_RECENT_DAYS = 7            # Include transactions from last N days
+SILVER_PNL_HISTORICAL_LIMIT = 100     # Maximum total transactions per wallet
+SILVER_PNL_MIN_TRANSACTIONS = 5       # Skip wallets with too few trades
+
+# PnL Calculation Precision
+PNL_AMOUNT_PRECISION_THRESHOLD = 0.001  # Minimum amount threshold for calculations
+PNL_CALCULATION_PRECISION = 6          # Decimal places for PnL calculations
+
+# Processing Performance
+PNL_BATCH_PROGRESS_INTERVAL = 10      # Log progress every N wallets
+PNL_MAX_PROCESSING_TIME_MINUTES = 30  # Timeout for PnL calculations
+
+# =============================================================================
 # GOLD LAYER THRESHOLDS
 # =============================================================================
 
@@ -63,7 +80,7 @@ PNL_QUARTER_DAYS = 90
 MIN_TOTAL_PNL = 10.0                 # Minimum profit in USD (realistic threshold)
 MIN_ROI_PERCENT = 1.0                # Minimum ROI percentage
 MIN_WIN_RATE_PERCENT = 40.0          # Minimum win rate percentage
-MIN_TRADE_COUNT = 1                  # Minimum number of trades (adjusted for current data)
+MIN_TRADE_COUNT = 10                  # Minimum number of trades (adjusted for current data)
 
 # Performance Tier Thresholds
 # Elite Tier
@@ -119,7 +136,8 @@ SPARK_PACKAGES = "org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-
 # Storage Paths
 BRONZE_TOKEN_LIST_PATH = "bronze/token_list_v3"
 BRONZE_TOKEN_WHALES_PATH = "bronze/token_whales"  
-BRONZE_WALLET_TRANSACTIONS_PATH = "bronze/wallet_transactions"
+BRONZE_WALLET_TRANSACTIONS_PATH = "bronze/wallet_transactions"  # Clean deduplicated data (primary)
+BRONZE_WALLET_TRANSACTIONS_WITH_DUPES_PATH = "bronze/wallet_transactions_with_dupes"  # Archived duplicate data
 SILVER_TRACKED_TOKENS_PATH = "silver/tracked_tokens"
 SILVER_WALLET_PNL_PATH = "silver/wallet_pnl"
 GOLD_TOP_TRADERS_PATH = "gold/top_traders"
