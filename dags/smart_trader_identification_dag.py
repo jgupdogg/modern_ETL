@@ -147,26 +147,96 @@ def bronze_wallet_transactions_task(**context):
         raise
 
 def gold_top_traders_task(**context):
-    """Task 6: Create top trader analytics"""
+    """Task 6: Create top trader analytics using dbt"""
     logger = logging.getLogger(__name__)
     
     try:
-        from tasks.smart_traders.gold_tasks import transform_gold_top_traders
-        result = transform_gold_top_traders(**context)
+        import subprocess
+        import json
+        from datetime import datetime
         
-        # Log aggregated success info
-        if result and isinstance(result, dict):
-            traders_count = result.get('smart_traders_count', 0)
-            dbt_status = result.get('dbt_status', 'unknown')
-            
-            if dbt_status == 'success':
-                logger.info(f"✅ GOLD TRADERS: Identified {traders_count} smart traders via dbt")
-            else:
-                logger.warning(f"⚠️ GOLD TRADERS: dbt run issues, found {traders_count} traders")
-        else:
-            logger.warning("⚠️ GOLD TRADERS: No analytics result returned")
-            
-        return result
+        batch_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        logger.info(f"Starting dbt smart wallets transformation - batch {batch_id}")
+        
+        # Run dbt model for smart wallets
+        env = os.environ.copy()
+        env['DBT_PROFILES_DIR'] = '/opt/airflow/dbt'
+        
+        # Run dbt model
+        result = subprocess.run(
+            ['dbt', 'run', '--models', 'smart_wallets'],
+            cwd='/opt/airflow/dbt',
+            env=env,
+            capture_output=True,
+            text=True
+        )
+        
+        if result.returncode != 0:
+            logger.error(f"dbt run failed: {result.stderr}")
+            return {
+                'status': 'failed',
+                'error': result.stderr,
+                'batch_id': batch_id,
+                'smart_traders_count': 0,
+                'dbt_status': 'failed'
+            }
+        
+        logger.info("dbt smart wallets model executed successfully")
+        
+        # Query results to get trader count
+        validation_cmd = """
+        docker exec claude_pipeline-duckdb python3 -c "
+import duckdb
+conn = duckdb.connect('/data/analytics.duckdb')
+conn.execute('LOAD httpfs;')
+conn.execute('SET s3_endpoint=\\'minio:9000\\';')
+conn.execute('SET s3_access_key_id=\\'minioadmin\\';')
+conn.execute('SET s3_secret_access_key=\\'minioadmin123\\';')
+conn.execute('SET s3_use_ssl=false;')
+conn.execute('SET s3_url_style=\\'path\\';')
+
+try:
+    # Get smart wallet counts
+    smart_wallets_count = conn.execute('SELECT COUNT(DISTINCT wallet_address) FROM smart_wallets;').fetchone()[0]
+    
+    # Get performance tier breakdown
+    tier_counts = conn.execute('SELECT performance_tier, COUNT(*) as count FROM smart_wallets GROUP BY performance_tier;').fetchall()
+    tier_dict = {row[0]: row[1] for row in tier_counts}
+    
+    print(f'RESULT:{{\\"count\\":{smart_wallets_count},\\"tiers\\":{tier_dict}}}')
+except Exception as e:
+    print(f'ERROR:{e}')
+conn.close()
+"
+        """
+        
+        validation_result = subprocess.run(validation_cmd, shell=True, capture_output=True, text=True)
+        
+        # Parse validation results
+        smart_traders_count = 0
+        performance_tiers = {}
+        
+        if "RESULT:" in validation_result.stdout:
+            try:
+                result_json = validation_result.stdout.split("RESULT:")[1].strip()
+                result_data = json.loads(result_json)
+                smart_traders_count = result_data.get('count', 0)
+                performance_tiers = result_data.get('tiers', {})
+            except:
+                logger.warning("Could not parse validation results")
+        
+        logger.info(f"✅ GOLD TRADERS: Identified {smart_traders_count} smart traders via dbt")
+        if performance_tiers:
+            logger.info(f"Performance tier breakdown: {performance_tiers}")
+        
+        return {
+            'status': 'success',
+            'smart_traders_count': smart_traders_count,
+            'performance_tiers': performance_tiers,
+            'batch_id': batch_id,
+            'dbt_status': 'success',
+            'dbt_output': result.stdout
+        }
         
     except Exception as e:
         # Log major errors only
@@ -608,13 +678,11 @@ def silver_wallet_pnl_task(**context):
     try:
         # Read raw bronze transactions
         try:
-            # Read only recent raw transactions to avoid schema conflicts
-            # For now, focus on today's data until we clean up the bronze layer schemas
-            current_date = datetime.now(timezone.utc).strftime("date=%Y-%m-%d")
-            parquet_path = f"s3a://solana-data/bronze/wallet_transactions/{current_date}/wallet_transactions_*.parquet"
+            # Read ALL available bronze transaction data for comprehensive analysis
+            parquet_path = f"s3a://solana-data/bronze/wallet_transactions/*/wallet_transactions_*.parquet"
             
             bronze_df = spark.read.parquet(parquet_path)
-            logger.info(f"Successfully read raw bronze data from {current_date}")
+            logger.info(f"Successfully read raw bronze data from all available dates")
             
             # Deduplicate by transaction hash
             deduped_df = bronze_df.dropDuplicates(["wallet_address", "transaction_hash"])

@@ -15,8 +15,8 @@ API_PAGINATION_LIMIT = 100           # Records per API call
 # Batch Processing Limits
 BRONZE_TOKEN_BATCH_LIMIT = 100       # Max tokens to fetch per run
 BRONZE_WHALE_BATCH_LIMIT = 50        # Max tokens to process for whales per run  
-BRONZE_WALLET_BATCH_LIMIT = 20       # Max wallets to process per run
-SILVER_PNL_BATCH_LIMIT = 1000        # Max wallets for PnL calculation per run
+BRONZE_WALLET_BATCH_LIMIT = 1000     # Max wallets to process per run (increased for full processing)
+SILVER_PNL_BATCH_LIMIT = 10000       # Max wallets for PnL calculation per run (increased for full processing)
 GOLD_MAX_TRADERS_PER_BATCH = 100     # Max top traders per batch
 
 # =============================================================================

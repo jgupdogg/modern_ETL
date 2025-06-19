@@ -789,19 +789,25 @@ def fetch_bronze_wallet_transactions(**context):
                 Body=b''
             )
             
-            # Write processing status file
-            status_data = {
+            # Write processing status file as parquet instead of JSON to avoid header parsing issues
+            status_data = [{
                 "batch_id": batch_id,
-                "processed_wallets": list(unique_wallets),
+                "processed_wallets_count": len(unique_wallets),
                 "total_transactions": len(all_transactions),
-                "timestamp": fetched_at.isoformat(),
+                "timestamp": fetched_at,
                 "schema_version": "raw_v1"
-            }
-            status_key = f"bronze/wallet_transactions/{date_partition}/status_{batch_id}.json"
+            }]
+            status_df = pd.DataFrame(status_data)
+            status_key = f"bronze/wallet_transactions/{date_partition}/status_{batch_id}.parquet"
+            
+            # Write status as parquet
+            status_buffer = BytesIO()
+            status_df.to_parquet(status_buffer, compression='snappy')
+            status_buffer.seek(0)
             s3_client.put_object(
                 Bucket='solana-data',
                 Key=status_key,
-                Body=json.dumps(status_data)
+                Body=status_buffer.getvalue()
             )
             
         except Exception as e:

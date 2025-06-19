@@ -221,18 +221,19 @@ if PYSPARK_AVAILABLE:
             # Clear Spark metadata cache to avoid stale file references
             spark.sql("CLEAR CACHE")
             
-            # Read silver wallet PnL data from most recent batch to avoid schema conflicts
-            # For now, focus on today's data with consistent schema
-            from datetime import datetime, timezone
-            current_date = datetime.now(timezone.utc)
-            silver_path = f"s3a://solana-data/silver/wallet_pnl/calculation_year={current_date.year}/calculation_month={current_date.month}/"
-            silver_df = spark.read.parquet(silver_path)
+            # Read ALL silver wallet PnL data, handling schema evolution
+            # Use mergeSchema to handle differences between old and new schemas
+            silver_path = f"s3a://solana-data/silver/wallet_pnl/"
+            silver_df = spark.read.option("mergeSchema", "true").parquet(silver_path)
             
             logger.info(f"Read {silver_df.count()} total silver PnL records")
             
             # Filter for portfolio-level records only (simplified schema)
+            # Also cast trade_count to ensure consistent data type
             unprocessed = silver_df.filter(
                 col("token_address") == "ALL_TOKENS"  # Portfolio-level only
+            ).withColumn(
+                "trade_count", col("trade_count").cast(IntegerType())  # Fix INT64 vs int mismatch
             )
             
             logger.info(f"Found {unprocessed.count()} unprocessed portfolio PnL records")
@@ -241,16 +242,30 @@ if PYSPARK_AVAILABLE:
             
         except Exception as e:
             logger.error(f"Error reading unprocessed silver PnL: {e}")
-            # Return empty DataFrame with correct schema if no data exists
-            schema = StructType([
+            # Return empty DataFrame with minimal schema required for processing
+            minimal_schema = StructType([
                 StructField("wallet_address", StringType()),
                 StructField("token_address", StringType()),
                 StructField("total_pnl", DoubleType()),
                 StructField("roi", DoubleType()),
                 StructField("win_rate", DoubleType()),
-                StructField("trade_count", IntegerType())
+                StructField("trade_count", IntegerType()),
+                StructField("realized_pnl", DoubleType()),
+                StructField("unrealized_pnl", DoubleType()),
+                StructField("total_bought", DoubleType()),
+                StructField("total_sold", DoubleType()),
+                StructField("avg_holding_time_hours", DoubleType()),
+                StructField("avg_transaction_amount_usd", DoubleType()),
+                StructField("trade_frequency_daily", DoubleType()),
+                StructField("first_transaction", TimestampType()),
+                StructField("last_transaction", TimestampType()),
+                StructField("current_position_tokens", DoubleType()),
+                StructField("current_position_cost_basis", DoubleType()),
+                StructField("current_position_value", DoubleType()),
+                StructField("calculation_date", DateType()),
+                StructField("batch_id", StringType())
             ])
-            return spark.createDataFrame([], schema)
+            return spark.createDataFrame([], minimal_schema)
 
 
     def select_top_performers(spark: SparkSession, silver_df: DataFrame) -> DataFrame:
