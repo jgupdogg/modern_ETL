@@ -1,0 +1,37 @@
+# Large generated/cache directories
+dbt/target/
+dbt/logs/
+dbt/dbt_packages/
+logs/
+data/
+
+# Python environments and caches
+scripts/venv/
+scripts/migration_env/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Git directory
+.git/
+
+# Docker and build artifacts
+.docker/
+node_modules/
+
+# Log files
+*.log
+*.out
+
+# Temporary files
+*.tmp
+*.temp
+.DS_Store
+
+# Additional optimizations
+*.parquet
+*.duckdb
+*.db
+temp_*
+scratch_*

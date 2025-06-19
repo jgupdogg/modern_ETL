@@ -98,20 +98,20 @@ def debug_bronze_data_analysis(**context):
             for row in tx_type_counts:
                 logger.info(f"  {row['tx_type']}: {row['count']:,}")
             
-            # Check swap transactions specifically
-            swap_df = bronze_df.filter(col("tx_type") == "swap")
-            swap_count = swap_df.count()
-            logger.info(f"🔄 Swap transactions: {swap_count:,}")
+            # Check trading transactions specifically (BUY and SELL)
+            trading_df = bronze_df.filter(col("tx_type").isin(["BUY", "SELL"]))
+            trading_count = trading_df.count()
+            logger.info(f"🔄 Trading transactions (BUY/SELL): {trading_count:,}")
             
-            if swap_count == 0:
-                logger.error("❌ PROBLEM: No swap transactions found!")
-                return {"status": "error", "message": "No swap transactions"}
+            if trading_count == 0:
+                logger.error("❌ PROBLEM: No trading transactions found!")
+                return {"status": "error", "message": "No trading transactions"}
             
             # Wallet analysis
             unique_wallets = bronze_df.select("wallet_address").distinct().count()
-            swap_wallets = swap_df.select("wallet_address").distinct().count()
+            trading_wallets = trading_df.select("wallet_address").distinct().count()
             logger.info(f"👛 Total unique wallets: {unique_wallets:,}")
-            logger.info(f"👛 Wallets with swaps: {swap_wallets:,}")
+            logger.info(f"👛 Wallets with trading: {trading_wallets:,}")
             
             # Check for nulls in critical fields
             null_checks = {}
@@ -132,9 +132,9 @@ def debug_bronze_data_analysis(**context):
             return {
                 "status": "success",
                 "total_records": total_records,
-                "swap_transactions": swap_count,
+                "trading_transactions": trading_count,
                 "unique_wallets": unique_wallets,
-                "swap_wallets": swap_wallets,
+                "trading_wallets": trading_wallets,
                 "tx_type_counts": {row['tx_type']: row['count'] for row in tx_type_counts},
                 "null_checks": null_checks,
                 "schema_fields": schema_fields
@@ -189,9 +189,9 @@ def debug_silver_pnl_logic(**context):
             logger.info("🔍 Applying filters...")
             
             # Check each filter step by step
-            filter_step1 = deduped_df.filter(col("tx_type") == "swap")
+            filter_step1 = deduped_df.filter(col("tx_type").isin(["BUY", "SELL"]))
             step1_count = filter_step1.count()
-            logger.info(f"  After tx_type = 'swap': {step1_count:,}")
+            logger.info(f"  After tx_type in ['BUY', 'SELL']: {step1_count:,}")
             
             filter_step2 = filter_step1.filter(col("transaction_hash").isNotNull())
             step2_count = filter_step2.count()
@@ -209,8 +209,8 @@ def debug_silver_pnl_logic(**context):
             step5_count = filter_step5.count()
             logger.info(f"  After base_address not null: {step5_count:,}")
             
-            swap_df = filter_step5.filter(col("quote_address").isNotNull())
-            final_count = swap_df.count()
+            trading_df = filter_step5.filter(col("quote_address").isNotNull())
+            final_count = trading_df.count()
             logger.info(f"  After quote_address not null: {final_count:,}")
             
             if final_count == 0:
@@ -219,12 +219,12 @@ def debug_silver_pnl_logic(**context):
                 # Debug which filter is eliminating all records
                 logger.info("🔍 Debugging filter eliminations...")
                 
-                # Check for swap transactions
-                swap_check = deduped_df.filter(col("tx_type") == "swap").count()
-                if swap_check == 0:
+                # Check for trading transactions
+                trading_check = deduped_df.filter(col("tx_type").isin(["BUY", "SELL"])).count()
+                if trading_check == 0:
                     # Check what tx_type values we have
                     tx_types = deduped_df.select("tx_type").distinct().collect()
-                    logger.error(f"❌ No 'swap' tx_type found. Available types: {[row['tx_type'] for row in tx_types]}")
+                    logger.error(f"❌ No 'BUY/SELL' tx_type found. Available types: {[row['tx_type'] for row in tx_types]}")
                 
                 # Check for null addresses
                 base_nulls = deduped_df.filter(col("base_address").isNull()).count()
@@ -234,9 +234,9 @@ def debug_silver_pnl_logic(**context):
                 return {"status": "error", "message": "No records pass filters"}
             
             # Step 3: Get unique wallets
-            unique_wallets = swap_df.select("wallet_address").distinct().collect()
+            unique_wallets = trading_df.select("wallet_address").distinct().collect()
             wallet_count = len(unique_wallets)
-            logger.info(f"👛 Found {wallet_count} unique wallets with valid swap transactions")
+            logger.info(f"👛 Found {wallet_count} unique wallets with valid trading transactions")
             
             if wallet_count == 0:
                 logger.error("❌ PROBLEM: No wallets found after filtering!")
@@ -252,7 +252,7 @@ def debug_silver_pnl_logic(**context):
             test_wallet = unique_wallets[0]['wallet_address']
             logger.info(f"🧪 Testing wallet: {test_wallet}")
             
-            wallet_txns = swap_df.filter(col("wallet_address") == test_wallet)
+            wallet_txns = trading_df.filter(col("wallet_address") == test_wallet)
             wallet_txn_count = wallet_txns.count()
             logger.info(f"  Wallet transactions: {wallet_txn_count}")
             
@@ -282,7 +282,7 @@ def debug_silver_pnl_logic(**context):
             return {
                 "status": "success",
                 "total_records": deduped_count,
-                "swap_records": final_count,
+                "trading_records": final_count,
                 "unique_wallets": wallet_count,
                 "test_wallet": test_wallet,
                 "test_wallet_txns": final_txn_count,

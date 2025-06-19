@@ -297,6 +297,10 @@ services:
     environment:
       DATA_DIR: /app/data
       REDPANDA_BROKERS: redpanda:9092
+      # Cleanup Configuration
+      WEBHOOK_RETENTION_DAYS: 7
+      CLEANUP_ENABLED: "true"
+      CLEANUP_ON_STARTUP: "true"
       # MinIO Configuration for Gold Layer Access
       MINIO_ENDPOINT: http://minio:9000
       MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}

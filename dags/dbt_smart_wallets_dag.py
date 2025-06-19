@@ -61,6 +61,77 @@ def run_dbt_command(command):
     print(result.stdout)
     return result.stdout
 
+def cleanup_dbt_artifacts():
+    """Clean up dbt target directory to prevent accumulation."""
+    import shutil
+    from pathlib import Path
+    
+    dbt_target_dir = Path('/opt/airflow/dbt/target')
+    
+    if not dbt_target_dir.exists():
+        print("dbt target directory does not exist, skipping cleanup")
+        return {"status": "skipped", "reason": "directory_not_found"}
+    
+    files_deleted = 0
+    space_freed = 0
+    
+    print("🧹 Cleaning dbt artifacts...")
+    
+    # Clean up old compilation artifacts (keep only current)
+    files_to_clean = [
+        'run_results.json.bak',
+        'manifest.json.old',
+        'partial_parse.msgpack.old',
+        'graph.gpickle.old'
+    ]
+    
+    for file_pattern in files_to_clean:
+        for file_path in dbt_target_dir.glob(file_pattern):
+            try:
+                file_size = file_path.stat().st_size
+                file_path.unlink()
+                files_deleted += 1
+                space_freed += file_size
+                print(f"Deleted: {file_path}")
+            except (OSError, FileNotFoundError):
+                continue
+    
+    # Clean up old run/test directories (keep only latest)
+    for subdir in ['run', 'test']:
+        subdir_path = dbt_target_dir / subdir
+        if subdir_path.exists():
+            try:
+                # Remove files older than 1 day
+                cutoff_time = (datetime.now() - timedelta(days=1)).timestamp()
+                for item in subdir_path.rglob('*'):
+                    if item.is_file() and item.stat().st_mtime < cutoff_time:
+                        try:
+                            file_size = item.stat().st_size
+                            item.unlink()
+                            files_deleted += 1
+                            space_freed += file_size
+                        except (OSError, FileNotFoundError):
+                            continue
+            except Exception as e:
+                print(f"Warning: Could not clean {subdir}: {e}")
+    
+    space_freed_mb = space_freed / 1024 / 1024
+    result = {
+        "status": "success",
+        "files_deleted": files_deleted,
+        "space_freed_mb": round(space_freed_mb, 2)
+    }
+    
+    print(f"✅ dbt cleanup completed: {files_deleted} files, {space_freed_mb:.2f}MB freed")
+    return result
+
+# Pre-cleanup task
+dbt_cleanup_artifacts = PythonOperator(
+    task_id='dbt_cleanup_artifacts',
+    python_callable=cleanup_dbt_artifacts,
+    dag=dag
+)
+
 # DBT Commands for smart wallets model
 dbt_run_smart_wallets = PythonOperator(
     task_id='dbt_run_smart_wallets',
@@ -219,4 +290,4 @@ with dag:
     smart_wallets_validation = validate_smart_wallets_output()
     filtering_summary = generate_bot_filtering_summary(smart_wallets_validation)
     
-    dbt_run_smart_wallets >> dbt_test_smart_wallets >> smart_wallets_validation >> filtering_summary
+    dbt_cleanup_artifacts >> dbt_run_smart_wallets >> dbt_test_smart_wallets >> smart_wallets_validation >> filtering_summary

@@ -693,9 +693,9 @@ def silver_wallet_pnl_task(**context):
             # Deduplicate by transaction hash
             deduped_df = bronze_df.dropDuplicates(["wallet_address", "transaction_hash"])
             
-            # Filter for swap transactions only
-            swap_df = deduped_df.filter(
-                (col("tx_type") == "swap") &
+            # Filter for valid trading transactions (BUY and SELL, excluding UNKNOWN)
+            trading_df = deduped_df.filter(
+                (col("tx_type").isin(["BUY", "SELL"])) &
                 (col("transaction_hash").isNotNull()) &
                 (col("wallet_address").isNotNull()) &
                 (col("timestamp").isNotNull()) &
@@ -704,12 +704,12 @@ def silver_wallet_pnl_task(**context):
             )
             
             # Get unique wallets
-            unique_wallets = swap_df.select("wallet_address").distinct().collect()
+            unique_wallets = trading_df.select("wallet_address").distinct().collect()
             wallet_count = len(unique_wallets)
-            logger.info(f"Found {wallet_count} unique wallets with swap transactions")
+            logger.info(f"Found {wallet_count} unique wallets with trading transactions")
             
             if wallet_count == 0:
-                logger.info("No wallets with swap transactions - returning success")
+                logger.info("No wallets with trading transactions - returning success")
                 return {
                     "wallets_processed": 0,
                     "total_pnl_records": 0,
@@ -728,7 +728,7 @@ def silver_wallet_pnl_task(**context):
                 wallet_address = wallet_row['wallet_address']
                 
                 # Get all transactions for this wallet
-                wallet_txns = swap_df.filter(col("wallet_address") == wallet_address)
+                wallet_txns = trading_df.filter(col("wallet_address") == wallet_address)
                 
                 # Apply smart filtering: recent + historical
                 recent_txns = wallet_txns.filter(col("timestamp") >= lit(week_ago))
