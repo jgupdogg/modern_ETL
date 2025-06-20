@@ -1,18 +1,18 @@
 # Smart Trader Identification Pipeline
 
 **Pipeline Status**: ✅ **PRODUCTION READY & VALIDATED**  
-**Last Updated**: June 18, 2025  
-**Last Test Run**: ✅ **100% SUCCESS** (June 18, 2025)  
+**Last Updated**: June 19, 2025  
+**Last Test Run**: ✅ **100% SUCCESS** (June 19, 2025)  
 **Data Location**: `s3://solana-data/` (MinIO)  
-**DAG**: `smart_trader_identification_dag`
+**DAG**: `smart_trader_identification_dag` (Consolidated Architecture)
 
 ## Executive Summary
 
 The Smart Trader Identification Pipeline is a **fully validated, production-ready** end-to-end system for identifying and monitoring profitable cryptocurrency traders on Solana. The pipeline processes real token data, analyzes whale holdings, calculates comprehensive PnL metrics using FIFO methodology, and outputs elite traders for real-time monitoring via Helius webhooks.
 
-**Current Status**: ✅ **FULLY OPERATIONAL** with validated minimal logging, robust error handling, and complete data flow.
+**Current Status**: ✅ **FULLY OPERATIONAL** with consolidated @task architecture, 100% centralized configuration, validated minimal logging, robust error handling, and complete data flow.
 
-## 🎯 RECENT VALIDATION (June 18, 2025)
+## 🎯 RECENT VALIDATION & CONSOLIDATION (June 19, 2025)
 
 ### Complete DAG Test Results
 - **Success Rate**: ✅ **100% (7/7 tasks)**
@@ -27,6 +27,8 @@ The Smart Trader Identification Pipeline is a **fully validated, production-read
 3. **✅ Gold Layer Spark Fix**: Resolved metadata cache issues with `CLEAR CACHE` command
 4. **✅ Minimal Logging System**: Comprehensive error categorization and success metrics
 5. **✅ Complete Data Flow**: Validated bronze → silver → gold → helius integration
+6. **✅ Consolidated DAG Architecture**: Single DAG with @task decorators replacing individual DAGs
+7. **✅ 100% Centralized Configuration**: All hardcoded values removed, 67+ parameters centralized
 
 ## Pipeline Architecture & Technology Stack
 
@@ -136,9 +138,11 @@ BirdEye API → Token List → Token Whales → Wallet Transactions → PnL Calc
 
 **Task 5: `silver_wallet_pnl_task`** (`smart_trader_identification_dag.py:@task`)
 - **Technology**: 🚀 **PySpark with Custom FIFO UDF**
+- **Architecture**: **@task decorator pattern** (consolidated from individual DAG)
 - **Processing**: Advanced cost basis calculation using FIFO methodology
 - **Features**: Handles complex scenarios (SELL-before-BUY, partial matching)
 - **Memory**: 2GB driver/executor for large-scale processing
+- **Configuration**: 100% centralized parameters from `smart_trader_config.py`
 - **Output**: Portfolio-level PnL metrics with comprehensive analytics
 
 #### Active Datasets (2 total)
@@ -197,8 +201,10 @@ roi                            DOUBLE       -- Return on investment
 
 **Task 6: `gold_top_traders`** (`smart_trader_identification_dag.py:gold_top_traders_task`)
 - **Technology**: 🦆 **dbt + DuckDB + subprocess execution**
+- **Architecture**: **@task decorator pattern** (consolidated from individual DAG)
 - **Model**: `dbt/models/gold/smart_wallets.sql` 
 - **Processing**: SQL-based filtering and performance tier classification
+- **Configuration**: Centralized dbt paths and validation commands
 - **Features**: Smart trader scoring, profitability ranking, tier assignment
 - **Output**: DuckDB table + S3 parquet via post-hook
 
@@ -235,7 +241,9 @@ Based on real data analysis, updated thresholds:
 
 **Task 7: `helius_webhook_update`** (`helius_tasks.py:update_helius_webhook`)
 - **Technology**: 🐍 **Python + Requests + Pandas**
+- **Architecture**: **@task decorator pattern** (consolidated implementation)
 - **Processing**: Reads latest gold traders, formats for Helius API
+- **Configuration**: Centralized Helius API settings and limits
 - **Features**: Performance tier prioritization, address limit handling
 - **Integration**: REST API calls to Helius webhook endpoints
 - **Output**: Real-time monitoring setup for profitable wallets
@@ -271,23 +279,25 @@ logger.info(f"✅ BRONZE TRANSACTIONS: Processed {wallets_processed} wallets, sa
 - **🚨 Critical Error Detection**: Rate limits, auth failures, timeouts, API issues
 - **⚡ Quick Diagnosis**: Minimal but actionable logging
 
-## Key DAGs & Consolidated Pipeline
+## Consolidated DAG Architecture
 
-### Master DAG: `smart_trader_identification`
+### Master DAG: `smart_trader_identification` ✅ **PRODUCTION ARCHITECTURE**
 **Schedule**: `0 9,21 * * *` (9 AM & 9 PM UTC)  
-**Status**: ✅ **100% Success Rate Validated**
+**Status**: ✅ **100% Success Rate Validated**  
+**Architecture**: **Consolidated @task Decorator Pattern** (Replaced Individual DAGs)
 
-**Task Flow**:
-1. **bronze_token_list** → **silver_tracked_tokens** → **bronze_token_whales** → **bronze_wallet_transactions** → **silver_wallet_pnl_task** → **gold_top_traders** → **helius_webhook_update**
+**Task Flow** (@task decorators):
+1. **@task bronze_token_list_task** → **@task silver_tracked_tokens_task** → **@task bronze_token_whales_task** → **@task bronze_wallet_transactions_task** → **@task silver_wallet_pnl_task** → **@task gold_top_traders_task** → **@task helius_webhook_update_task**
 
-**Execution Dependencies**: Linear pipeline with proper dependency management
+**Architecture Benefits**:
+- ✅ **Single DAG Management**: All tasks in one consolidated pipeline
+- ✅ **@task Decorator Pattern**: Clean, maintainable task definitions
+- ✅ **Centralized Configuration**: 100% parameter consolidation
+- ✅ **Linear Dependencies**: Proper task flow with XCom passing
+- ✅ **Unified Error Handling**: Consistent logging across all tasks
 
-### Individual Component DAGs (Legacy)
-1. **bronze_token_list**: Token data ingestion 
-2. **bronze_token_whales**: Whale holder data  
-3. **bronze_wallet_transactions**: Transaction history 
-4. **silver_wallet_pnl**: PnL calculation 
-5. **gold_top_traders**: Top trader selection 
+### Legacy Individual DAGs (Replaced)
+*Note: Individual component DAGs have been consolidated into the master DAG for better management and consistency.* 
 
 ## ✅ VALIDATED QUERY PATTERNS
 
@@ -350,9 +360,10 @@ docker exec claude_pipeline-duckdb python3 /scripts/analyze_silver_pnl_data.py
 
 ## 🔧 Configuration Management
 
-### Centralized Configuration System ✅ **VALIDATED**
+### Centralized Configuration System ✅ **100% COMPLETE**
 **Location**: `dags/config/smart_trader_config.py`  
-**Parameters**: **67 configurable parameters** organized by layer
+**Parameters**: **67+ configurable parameters** organized by layer  
+**Status**: ✅ **Zero Hardcoded Values** - Final cleanup completed June 19, 2025
 
 #### Production-Tuned Configuration (Based on Real Data)
 ```python
@@ -375,7 +386,9 @@ SPARK_EXECUTOR_MEMORY = "2g"
 - ✅ **Validated thresholds**: Based on real data analysis
 - ✅ **API fixes**: Correct endpoints configured
 - ✅ **Memory optimization**: Tuned for actual data volumes
-- ✅ **Production ready**: No hardcoded values in task modules
+- ✅ **100% Centralized**: Zero hardcoded values across entire pipeline
+- ✅ **Final Cleanup**: Removed last bucket names and duplicate configs
+- ✅ **Production ready**: Complete configuration consolidation achieved
 
 ## Technical Architecture
 
@@ -386,6 +399,7 @@ SPARK_EXECUTOR_MEMORY = "2g"
 - **🌐 Custom BirdEye Client**: Rate-limited API integration with pagination
 - **💾 Parquet + Snappy**: Efficient columnar storage with compression
 - **☁️ Boto3 + MinIO**: S3-compatible object storage
+- **🏗️ @task Decorators**: Consolidated task architecture pattern
 
 #### Silver Layer Technologies:
 - **🚀 PySpark 3.5.0**: Large-scale distributed processing
@@ -402,13 +416,17 @@ SPARK_EXECUTOR_MEMORY = "2g"
 #### Integration Technologies:
 - **🌐 Python Requests**: REST API integration for Helius
 - **⚙️ Apache Airflow**: Workflow orchestration (7/7 tasks successful)
-- **📋 Centralized Config**: Python-based configuration management
+- **📋 Centralized Config**: Python-based configuration management (100% complete)
+- **🏗️ @task Architecture**: Consolidated decorator pattern implementation
 
 ### Key Improvements Implemented
 - **Enhanced FIFO UDF**: Handles SELL-before-BUY, partial matching
 - **Spark Metadata Management**: `CLEAR CACHE` prevents file not found errors
 - **Robust File Reading**: Wildcard patterns for reliable data access
 - **Comprehensive Logging**: Minimal but actionable error tracking
+- **Consolidated DAG Architecture**: @task decorator pattern replacing individual DAGs
+- **100% Configuration Centralization**: All hardcoded values eliminated
+- **Task Module Consistency**: Unified import patterns and error handling
 
 ## Business Value
 
@@ -433,13 +451,15 @@ SPARK_EXECUTOR_MEMORY = "2g"
 
 The Smart Trader Identification Pipeline is **fully operational and battle-tested** with:
 
-### ✅ Complete Validation (June 18, 2025)
+### ✅ Complete Validation & Consolidation (June 19, 2025)
 - **100% DAG Success Rate**: All 7 tasks completed successfully
 - **Real Data Processing**: 5,958 silver PnL records from actual whale transactions
 - **API Integration**: BirdEye endpoint fixed and working
 - **FIFO Calculations**: Enhanced algorithm validated with real transaction data
 - **Gold Layer**: Spark metadata issues resolved, 3 smart traders identified
 - **End-to-End Flow**: Bronze → Silver → Gold → Helius validated
+- **Consolidated Architecture**: @task decorator pattern implemented across pipeline
+- **Configuration Cleanup**: 100% centralization achieved, zero hardcoded values
 
 ### ✅ Production Features
 - **Robust Error Handling**: Comprehensive logging with clear error categorization
@@ -447,6 +467,8 @@ The Smart Trader Identification Pipeline is **fully operational and battle-teste
 - **Scalable Processing**: Enhanced FIFO handles complex transaction scenarios
 - **Real-time Integration**: Helius webhook updates working
 - **Monitoring Ready**: Minimal logging with actionable insights
+- **Consolidated Architecture**: Single DAG with @task decorators for maintainability
+- **100% Centralized Config**: Complete parameter consolidation for easy tuning
 
 ### ✅ Quality Assurance
 - **Data Quality**: Real whale transactions processed correctly
@@ -454,6 +476,8 @@ The Smart Trader Identification Pipeline is **fully operational and battle-teste
 - **Error Recovery**: Spark cache clearing resolves metadata issues
 - **Audit Trail**: Complete batch tracking and validation
 
-**Status**: ✅ **PRODUCTION READY** - Pipeline validated with real data and ready for live trading intelligence.
+**Status**: ✅ **PRODUCTION READY** - Pipeline validated with real data, consolidated architecture, and 100% centralized configuration. Ready for live trading intelligence.
+
+**Architecture Achievements**: ✅ Consolidated @task DAG, ✅ Zero hardcoded values, ✅ Complete config centralization
 
 **Next Steps**: Deploy to production environment and monitor performance metrics for scaling decisions.

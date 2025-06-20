@@ -72,6 +72,11 @@ PNL_CALCULATION_PRECISION = 6          # Decimal places for PnL calculations
 PNL_BATCH_PROGRESS_INTERVAL = 10      # Log progress every N wallets
 PNL_MAX_PROCESSING_TIME_MINUTES = 30  # Timeout for PnL calculations
 
+# Wallet Batch Processing (Memory Management)
+SILVER_PNL_WALLET_BATCH_SIZE = 5      # Process N wallets at a time to control memory usage
+SILVER_PNL_MAX_TRANSACTIONS_PER_BATCH = 500  # Limit transaction volume per batch
+SILVER_PNL_PROCESSING_TIMEOUT_SECONDS = 300  # 5 minutes timeout per wallet batch
+
 # =============================================================================
 # GOLD LAYER THRESHOLDS
 # =============================================================================
@@ -101,9 +106,6 @@ PERFORMANCE_LOOKBACK_DAYS = 30       # Days to look back for performance
 
 # (Promising Tier = anything that meets base requirements)
 
-# Analysis Settings
-PERFORMANCE_LOOKBACK_DAYS = 30       # Days to consider for tier calculation
-
 # =============================================================================
 # HELIUS INTEGRATION
 # =============================================================================
@@ -129,8 +131,9 @@ MINIO_SECRET_KEY = 'minioadmin123'
 MINIO_BUCKET = 'solana-data'
 
 # PySpark Configuration
-SPARK_DRIVER_MEMORY = '2g'
-SPARK_EXECUTOR_MEMORY = '2g'
+SPARK_DRIVER_MEMORY = '4g'  # Increased from 2g for large dataset processing
+SPARK_EXECUTOR_MEMORY = '4g'  # Increased from 2g for large dataset processing
+SPARK_DRIVER_MAX_RESULT_SIZE = '2g'  # Prevent driver OOM errors
 SPARK_PACKAGES = "org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.367"
 
 # Storage Paths
@@ -157,7 +160,7 @@ SOL_TOKEN_ADDRESS = "So11111111111111111111111111111111111111112"
 # =============================================================================
 
 def get_spark_config():
-    """Get PySpark configuration dictionary"""
+    """Get PySpark configuration dictionary with memory optimization and JVM tuning"""
     return {
         "spark.jars.packages": SPARK_PACKAGES,
         "spark.hadoop.fs.s3a.endpoint": MINIO_ENDPOINT,
@@ -166,15 +169,118 @@ def get_spark_config():
         "spark.hadoop.fs.s3a.path.style.access": "true",
         "spark.hadoop.fs.s3a.connection.ssl.enabled": "false",
         "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
-        "spark.sql.adaptive.enabled": "true", 
-        "spark.sql.adaptive.coalescePartitions.enabled": "true",
-        "spark.sql.adaptive.skewJoin.enabled": "true",
+        
+        # Memory Configuration (Increased for large datasets)
         "spark.driver.memory": SPARK_DRIVER_MEMORY,
         "spark.executor.memory": SPARK_EXECUTOR_MEMORY,
+        "spark.driver.maxResultSize": SPARK_DRIVER_MAX_RESULT_SIZE,
+        
+        # Conservative Parallelism (Reduced for memory control)
+        "spark.default.parallelism": "2",
+        "spark.sql.adaptive.enabled": "false",  # Disable adaptive for predictable memory usage
+        "spark.sql.adaptive.coalescePartitions.enabled": "false",
+        "spark.sql.adaptive.skewJoin.enabled": "false",
+        
+        # JVM Tuning for Garbage Collection
+        "spark.driver.extraJavaOptions": "-XX:+UseG1GC -XX:MaxGCPauseMillis=200 -XX:+UnlockExperimentalVMOptions",
+        "spark.executor.extraJavaOptions": "-XX:+UseG1GC -XX:MaxGCPauseMillis=200 -XX:+UnlockExperimentalVMOptions",
+        
+        # Serialization and Performance
         "spark.serializer": "org.apache.spark.serializer.KryoSerializer",
-        "spark.sql.execution.arrow.pyspark.enabled": "true"
+        "spark.sql.execution.arrow.pyspark.enabled": "true",
+        
+        # Connection Stability
+        "spark.hadoop.fs.s3a.connection.timeout": "30000",  # 30 second timeout
+        "spark.hadoop.fs.s3a.retry.limit": "3",
+        "spark.network.timeout": "600s"  # 10 minute network timeout
     }
 
 def get_s3_path(path_suffix):
     """Get full S3 path for a dataset"""
     return f"s3a://{MINIO_BUCKET}/{path_suffix}/"
+
+# =============================================================================
+# DAG CONFIGURATION
+# =============================================================================
+
+# DAG Scheduling & Execution
+DAG_SCHEDULE_INTERVAL = '0 9,21 * * *'  # 9 AM & 9 PM UTC
+DAG_MAX_ACTIVE_RUNS = 1
+DAG_CATCHUP = False
+DAG_RETRIES = 2
+DAG_RETRY_DELAY_MINUTES = 10
+DAG_START_DAYS_AGO = 1
+
+# DAG Metadata
+DAG_OWNER = 'data-team'
+DAG_DEPENDS_ON_PAST = False
+DAG_EMAIL_ON_FAILURE = False
+DAG_EMAIL_ON_RETRY = False
+DAG_TAGS = ['end-to-end', 'smart-traders', 'medallion', 'analytics']
+
+# =============================================================================
+# DBT CONFIGURATION
+# =============================================================================
+
+# dbt Paths and Execution
+DBT_PROFILES_DIR = '/opt/airflow/dbt'
+DBT_PROJECT_DIR = '/opt/airflow/dbt'
+DBT_MODEL_NAME = 'smart_wallets'
+
+# =============================================================================
+# VALIDATION CONFIGURATION
+# =============================================================================
+
+# DuckDB Validation Settings
+DUCKDB_CONTAINER_NAME = 'claude_pipeline-duckdb'
+DUCKDB_DATABASE_PATH = '/data/analytics.duckdb'
+
+# =============================================================================
+# ERROR CODE PATTERNS
+# =============================================================================
+
+# API Error Codes for Error Handling
+API_RATE_LIMIT_CODES = ['429']
+API_AUTH_ERROR_CODES = ['401', '403']
+API_NOT_FOUND_CODES = ['404']
+API_TIMEOUT_KEYWORDS = ['timeout']
+API_RATE_LIMIT_KEYWORDS = ['rate limit']
+API_AUTH_KEYWORDS = ['auth']
+
+# Data Processing Error Keywords
+DATA_EMPTY_KEYWORDS = ['no data', 'empty']
+DATA_THRESHOLD_KEYWORDS = ['threshold']
+PYSPARK_ERROR_KEYWORDS = ['pyspark', 'spark']
+STORAGE_ERROR_KEYWORDS = ['s3', 'minio']
+MEMORY_ERROR_KEYWORDS = ['out of memory', 'memory']
+DBT_ERROR_KEYWORDS = ['dbt']
+SQL_ERROR_KEYWORDS = ['sql', 'database']
+NO_RESULTS_KEYWORDS = ['no silver data', 'no traders', 'no wallets', 'no tokens']
+
+def get_duckdb_validation_command():
+    """Get the DuckDB validation command for gold layer analytics"""
+    return f"""
+    docker exec {DUCKDB_CONTAINER_NAME} python3 -c "
+import duckdb
+conn = duckdb.connect('{DUCKDB_DATABASE_PATH}')
+conn.execute('LOAD httpfs;')
+conn.execute('SET s3_endpoint=\\'{MINIO_ENDPOINT}\\';')
+conn.execute('SET s3_access_key_id=\\'{MINIO_ACCESS_KEY}\\';')
+conn.execute('SET s3_secret_access_key=\\'{MINIO_SECRET_KEY}\\';')
+conn.execute('SET s3_use_ssl=false;')
+conn.execute('SET s3_url_style=\\'path\\';')
+
+try:
+    # Get smart wallet counts
+    smart_wallets_count = conn.execute('SELECT COUNT(DISTINCT wallet_address) FROM smart_wallets;').fetchone()[0]
+    
+    # Get performance tier breakdown
+    tier_counts = conn.execute('SELECT performance_tier, COUNT(*) as count FROM smart_wallets GROUP BY performance_tier;').fetchall()
+    tier_dict = {{row[0]: row[1] for row in tier_counts}}
+    
+    print(f'RESULT:{{\\\"count\\\":\\{{smart_wallets_count}},\\\"tiers\\\":\\{{tier_dict}}}}')
+except Exception as e:
+    print(f'ERROR:{{e}}')
+conn.close()
+"
+    """

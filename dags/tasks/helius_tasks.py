@@ -46,7 +46,7 @@ def read_latest_gold_traders() -> List[Dict[str, Any]]:
     try:
         # List all gold top trader files
         response = s3_client.list_objects_v2(
-            Bucket='solana-data',
+            Bucket=MINIO_BUCKET,
             Prefix='gold/top_traders/',
             MaxKeys=1000
         )
