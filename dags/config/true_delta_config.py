@@ -29,8 +29,14 @@ DELTA_SPARK_CONFIG = {
     # Performance optimizations
     "spark.sql.adaptive.enabled": "true",
     "spark.sql.adaptive.coalescePartitions.enabled": "true", 
-    "spark.driver.memory": "2g",
-    "spark.executor.memory": "2g",
+    "spark.driver.memory": "1g",  # Reduced for Docker environment
+    "spark.executor.memory": "1g",  # Reduced for Docker environment
+    "spark.driver.maxResultSize": "512m",  # Prevent OOM
+    
+    # Docker-specific optimizations
+    "spark.executor.instances": "1",  # Single executor in Docker
+    "spark.sql.shuffle.partitions": "200",  # Default partitions
+    "spark.network.timeout": "300s",  # Increase timeout for Docker
     
     # Delta Lake optimizations
     "spark.databricks.delta.retentionDurationCheck.enabled": "false",
