@@ -52,6 +52,53 @@ def fetch_bronze_tokens(**context):
         raise
 
 @task
+def create_silver_tracked_tokens(**context):
+    """Create silver tracked tokens by filtering bronze tokens by liquidity"""
+    logger = logging.getLogger(__name__)
+    
+    try:
+        # Run the dbt model for silver tracked tokens
+        import subprocess
+        result = subprocess.run([
+            'python', '/opt/airflow/scripts/run_dbt_spark_silver.py',
+            '--model', 'silver_delta_tracked_tokens'
+        ], capture_output=True, text=True)
+        
+        if result.returncode == 0:
+            logger.info("✅ Silver tracked tokens: Created successfully")
+            return {"status": "success", "model": "silver_delta_tracked_tokens"}
+        else:
+            logger.error(f"❌ Silver tracked tokens failed: {result.stderr}")
+            raise Exception(f"dbt model failed: {result.stderr}")
+            
+    except Exception as e:
+        logger.error(f"❌ Silver tracked tokens failed: {str(e)}")
+        raise
+
+@task
+def create_silver_tracked_whales(**context):
+    """Create silver tracked whales by joining tokens and whale holders"""
+    logger = logging.getLogger(__name__)
+    
+    try:
+        # Run the dbt model for silver tracked whales
+        import subprocess
+        result = subprocess.run([
+            'python', '/opt/airflow/scripts/run_dbt_spark_silver_whales.py'
+        ], capture_output=True, text=True)
+        
+        if result.returncode == 0:
+            logger.info("✅ Silver tracked whales: Created successfully")
+            return {"status": "success", "model": "silver_delta_tracked_whales"}
+        else:
+            logger.error(f"❌ Silver tracked whales failed: {result.stderr}")
+            raise Exception(f"Script failed: {result.stderr}")
+            
+    except Exception as e:
+        logger.error(f"❌ Silver tracked whales failed: {str(e)}")
+        raise
+
+@task
 def fetch_bronze_whales(**context):
     """Fetch whale data for tokens to smart-trader bucket with TRUE Delta Lake"""
     logger = logging.getLogger(__name__)
@@ -197,14 +244,25 @@ dag = DAG(
     tags=['delta-lake', 'true-implementation', 'acid'] + DAG_TAGS,
 )
 
-# Task Dependencies - Simplified Linear Flow
+# Task Dependencies - Complete Medallion Architecture
 with dag:
+    # Bronze layer
     bronze_tokens = fetch_bronze_tokens()
+    
+    # Silver layer transformations
+    silver_tracked_tokens = create_silver_tracked_tokens()
+    silver_tracked_whales = create_silver_tracked_whales()
+    
+    # Bronze layer continued (depends on silver)
     bronze_whales = fetch_bronze_whales()
     bronze_transactions = fetch_bronze_transactions()
+    
+    # Silver layer analytics
     silver_pnl = calculate_silver_pnl()
+    
+    # Gold layer
     gold_traders = generate_gold_traders()
     helius_update = update_helius_webhooks()
     
-    # Dependencies: Bronze layers can run in parallel, then silver, then gold
-    [bronze_tokens, bronze_whales] >> bronze_transactions >> silver_pnl >> gold_traders >> helius_update
+    # Dependencies: Proper medallion flow
+    bronze_tokens >> silver_tracked_tokens >> silver_tracked_whales >> bronze_whales >> bronze_transactions >> silver_pnl >> gold_traders >> helius_update
