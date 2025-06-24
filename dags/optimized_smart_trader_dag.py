@@ -53,50 +53,166 @@ def fetch_bronze_tokens(**context):
 
 @task
 def create_silver_tracked_tokens(**context):
-    """Create silver tracked tokens by filtering bronze tokens by liquidity"""
+    """Create silver tracked tokens by filtering bronze tokens by liquidity using Delta Lake"""
     logger = logging.getLogger(__name__)
     
     try:
-        # Run the dbt model for silver tracked tokens
-        import subprocess
-        result = subprocess.run([
-            'python', '/opt/airflow/scripts/run_dbt_spark_silver.py',
-            '--model', 'silver_delta_tracked_tokens'
-        ], capture_output=True, text=True)
+        from utils.true_delta_manager import TrueDeltaLakeManager
+        from pyspark.sql.functions import col, lit, current_timestamp, row_number, when, coalesce
+        from pyspark.sql.window import Window
         
-        if result.returncode == 0:
-            logger.info("✅ Silver tracked tokens: Created successfully")
-            return {"status": "success", "model": "silver_delta_tracked_tokens"}
-        else:
-            logger.error(f"❌ Silver tracked tokens failed: {result.stderr}")
-            raise Exception(f"dbt model failed: {result.stderr}")
-            
+        delta_manager = TrueDeltaLakeManager()
+        
+        # Read bronze tokens from Delta Lake
+        bronze_tokens_path = "s3a://smart-trader/bronze/token_metrics"
+        if not delta_manager.table_exists(bronze_tokens_path):
+            logger.warning("Bronze tokens table not found")
+            return {"status": "no_source", "records": 0}
+        
+        bronze_df = delta_manager.spark.read.format("delta").load(bronze_tokens_path)
+        
+        # Apply silver layer transformations (similar to dbt model)
+        filtered_df = bronze_df.filter(
+            (col("liquidity") >= 100000) &  # Min $100K liquidity
+            col("token_address").isNotNull() &
+            col("symbol").isNotNull() &
+            col("liquidity").isNotNull() &
+            col("price").isNotNull()
+        )
+        
+        # Add liquidity tier and other silver layer fields
+        window_spec = Window.partitionBy("token_address").orderBy(col("processing_date").desc(), col("_delta_timestamp").desc())
+        
+        silver_df = filtered_df.withColumn(
+            "liquidity_tier",
+            when(col("liquidity") >= 1000000, "HIGH")
+            .when(col("liquidity") >= 500000, "MEDIUM")
+            .when(col("liquidity") >= 100000, "LOW")
+            .otherwise("MINIMAL")
+        ).withColumn(
+            "fdv_per_holder",
+            when(col("holder") > 0, col("fdv") / col("holder")).otherwise(None)
+        ).withColumn(
+            "whale_fetch_status", lit("pending")
+        ).withColumn(
+            "whale_fetched_at", lit(None).cast("timestamp")
+        ).withColumn(
+            "is_newly_tracked", lit(True)
+        ).withColumn(
+            "silver_created_at", current_timestamp()
+        ).withColumn(
+            "rn", row_number().over(window_spec)
+        ).filter(col("rn") == 1).drop("rn")
+        
+        # Write to silver tracked tokens Delta table
+        silver_tokens_path = "s3a://smart-trader/silver/tracked_tokens_delta"
+        version = delta_manager.create_table(
+            silver_df, 
+            silver_tokens_path,
+            partition_cols=None,  # No partitioning for silver layer
+            merge_schema=True
+        )
+        
+        record_count = silver_df.count()
+        logger.info(f"✅ Silver tracked tokens: {record_count} records created in Delta v{version}")
+        
+        return {
+            "status": "success", 
+            "records": record_count,
+            "delta_version": version,
+            "table_path": silver_tokens_path
+        }
+        
     except Exception as e:
         logger.error(f"❌ Silver tracked tokens failed: {str(e)}")
         raise
+    finally:
+        if 'delta_manager' in locals():
+            delta_manager.stop()
 
 @task
 def create_silver_tracked_whales(**context):
-    """Create silver tracked whales by joining tokens and whale holders"""
+    """Create silver tracked whales by filtering and enhancing bronze whale holders using Delta Lake"""
     logger = logging.getLogger(__name__)
     
     try:
-        # Run the dbt model for silver tracked whales
-        import subprocess
-        result = subprocess.run([
-            'python', '/opt/airflow/scripts/run_dbt_spark_silver_whales.py'
-        ], capture_output=True, text=True)
+        from utils.true_delta_manager import TrueDeltaLakeManager
+        from pyspark.sql.functions import col, lit, current_timestamp, row_number, when, concat, coalesce
+        from pyspark.sql.window import Window
         
-        if result.returncode == 0:
-            logger.info("✅ Silver tracked whales: Created successfully")
-            return {"status": "success", "model": "silver_delta_tracked_whales"}
-        else:
-            logger.error(f"❌ Silver tracked whales failed: {result.stderr}")
-            raise Exception(f"Script failed: {result.stderr}")
-            
+        delta_manager = TrueDeltaLakeManager()
+        
+        # Read bronze whale holders from Delta Lake
+        bronze_whales_path = "s3a://smart-trader/bronze/whale_holders"
+        if not delta_manager.table_exists(bronze_whales_path):
+            logger.warning("Bronze whale holders table not found")
+            return {"status": "no_source", "records": 0}
+        
+        bronze_df = delta_manager.spark.read.format("delta").load(bronze_whales_path)
+        
+        # Apply silver layer transformations (similar to dbt model)
+        filtered_df = bronze_df.filter(
+            col("wallet_address").isNotNull() &
+            col("token_address").isNotNull() &
+            (col("holdings_amount") > 0)
+        )
+        
+        # Add whale tiers and processing fields
+        window_spec = Window.partitionBy("wallet_address", "token_address").orderBy(col("rank_date").desc(), col("_delta_timestamp").desc())
+        
+        silver_df = filtered_df.withColumn(
+            "whale_id", concat(col("wallet_address"), lit("_"), col("token_address"))
+        ).withColumn(
+            "whale_tier",
+            when(col("holdings_amount") >= 1000000, "MEGA")
+            .when(col("holdings_amount") >= 100000, "LARGE")
+            .when(col("holdings_amount") >= 10000, "MEDIUM")
+            .when(col("holdings_amount") >= 1000, "SMALL")
+            .otherwise("MINIMAL")
+        ).withColumn(
+            "rank_tier",
+            when(col("rank") <= 3, "TOP_3")
+            .when(col("rank") <= 10, "TOP_10")
+            .when(col("rank") <= 50, "TOP_50")
+            .otherwise("OTHER")
+        ).withColumn(
+            "processing_status",
+            when(col("txns_fetched") == True, "completed")
+            .when(col("txns_fetch_status") == "pending", "pending")
+            .otherwise("ready")
+        ).withColumn(
+            "is_newly_tracked", lit(True)
+        ).withColumn(
+            "silver_created_at", current_timestamp()
+        ).withColumn(
+            "rn", row_number().over(window_spec)
+        ).filter(col("rn") == 1).drop("rn")
+        
+        # Write to silver tracked whales Delta table
+        silver_whales_path = "s3a://smart-trader/silver/tracked_whales_delta"
+        version = delta_manager.create_table(
+            silver_df,
+            silver_whales_path,
+            partition_cols=None,  # No partitioning for silver layer
+            merge_schema=True
+        )
+        
+        record_count = silver_df.count()
+        logger.info(f"✅ Silver tracked whales: {record_count} records created in Delta v{version}")
+        
+        return {
+            "status": "success",
+            "records": record_count, 
+            "delta_version": version,
+            "table_path": silver_whales_path
+        }
+        
     except Exception as e:
         logger.error(f"❌ Silver tracked whales failed: {str(e)}")
         raise
+    finally:
+        if 'delta_manager' in locals():
+            delta_manager.stop()
 
 @task
 def fetch_bronze_whales(**context):
