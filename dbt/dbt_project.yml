@@ -27,13 +27,22 @@ models:
     silver:
       +materialized: table
       +partition_by: processing_date
+    # Config applied to all models under models/gold/
+    gold:
+      +materialized: table
+      +unique_key: ['wallet_address', 'token_address']
 
 vars:
   # Define variables that can be used in models
   webhook_bucket: 'webhook-data'
   bronze_path: 'processed-webhooks'
   silver_path: 'silver-webhooks'
-  # Solana token data variables
+  # Solana token data variables (legacy)
   solana_bucket: 'solana-data'
   token_bronze_path: 'bronze/token_list_v3'
   token_silver_path: 'silver/tracked_tokens'
+  # Enhanced Delta Lake variables (NEW)
+  smart_trader_bucket: 'smart-trader'
+  enhanced_bronze_path: 'bronze'
+  enhanced_silver_path: 'silver'
+  enhanced_gold_path: 'gold'

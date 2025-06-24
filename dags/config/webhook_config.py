@@ -40,6 +40,7 @@ BRONZE_SPARK_MAX_RESULT_SIZE = os.getenv('BRONZE_SPARK_MAX_RESULT_SIZE', '1g')
 # Data Retention & Cleanup
 BRONZE_RETENTION_DAYS = int(os.getenv('BRONZE_RETENTION_DAYS', '30'))
 BRONZE_CLEANUP_ENABLED = os.getenv('BRONZE_CLEANUP_ENABLED', 'true').lower() == 'true'
+BRONZE_CHECKPOINT_CLEANUP_DAYS = int(os.getenv('BRONZE_CHECKPOINT_CLEANUP_DAYS', '7'))  # Clean checkpoints older than 7 days
 
 # Schema & Validation
 BRONZE_REQUIRE_WEBHOOK_ID = os.getenv('BRONZE_REQUIRE_WEBHOOK_ID', 'true').lower() == 'true'

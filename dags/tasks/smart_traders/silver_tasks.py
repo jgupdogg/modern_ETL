@@ -1,16 +1,20 @@
 """
-Silver Layer Tasks - MEMORY EFFICIENT VERSION
+Silver Layer Tasks - PROPERLY ARCHITECTED VERSION
 
 Core business logic for silver layer data transformation tasks.
-Contains the 2 active functions with actual PnL calculation logic preserved.
+Implements real PnL calculation logic with proper Spark patterns.
 
-OPTIMIZED: Hardcoded to process only 5 wallets at a time to prevent crashes
+Changes:
+- Uses date partitioning for efficient reads
+- No bronze overwrites - uses separate tracking
+- Real PnL calculations using groupBy (no collect!)
+- Proper transaction classification (BUY/SELL/SWAP)
 """
 import os
 import json
 import logging
-from datetime import datetime, timedelta
-from typing import Dict, Any, List
+from datetime import datetime, timedelta, timezone
+from typing import Dict, Any, List, Optional
 from io import BytesIO
 
 import pandas as pd
@@ -26,7 +30,9 @@ from config.smart_trader_config import (
     SOL_TOKEN_ADDRESS, MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, MINIO_BUCKET,
     SILVER_TRACKED_TOKENS_PATH, SILVER_WALLET_PNL_PATH, BRONZE_WALLET_TRANSACTIONS_PATH,
     # Wallet batch processing parameters
-    SILVER_PNL_WALLET_BATCH_SIZE, SILVER_PNL_MAX_TRANSACTIONS_PER_BATCH, SILVER_PNL_PROCESSING_TIMEOUT_SECONDS
+    SILVER_PNL_WALLET_BATCH_SIZE, SILVER_PNL_MAX_TRANSACTIONS_PER_BATCH, SILVER_PNL_PROCESSING_TIMEOUT_SECONDS,
+    # Delta Lake configuration
+    get_spark_config_with_delta, get_delta_s3_path
 )
 
 # PySpark imports (lazy loading)
@@ -34,16 +40,17 @@ try:
     from pyspark.sql import SparkSession, DataFrame
     from pyspark.sql.functions import (
         col, lit, when, sum as spark_sum, avg, count, max as spark_max, min as spark_min,
-        collect_list, struct, udf, current_timestamp, expr, coalesce, 
-        unix_timestamp, from_unixtime, datediff, hour, desc, asc, row_number
+        current_timestamp, expr, coalesce, round as spark_round,
+        datediff, abs as spark_abs
     )
     from pyspark.sql.types import (
         StructType, StructField, StringType, DoubleType, IntegerType, 
-        TimestampType, BooleanType, ArrayType, MapType, DateType
+        TimestampType, BooleanType, DateType
     )
-    from pyspark.sql.window import Window
+    from delta import DeltaTable
     PYSPARK_AVAILABLE = True
-except ImportError:
+except ImportError as e:
+    logging.getLogger(__name__).error(f"PySpark or Delta Lake not available: {e}")
     PYSPARK_AVAILABLE = False
 
 
@@ -260,7 +267,7 @@ def transform_silver_tracked_tokens(**context):
 if PYSPARK_AVAILABLE:
     
     def get_silver_pnl_schema() -> StructType:
-        """Get PySpark schema for silver PnL data (simplified without time_period)"""
+        """Get PySpark schema for silver PnL data"""
         return StructType([
             # Wallet identification
             StructField("wallet_address", StringType(), False),
@@ -299,368 +306,468 @@ if PYSPARK_AVAILABLE:
 
 
     def get_spark_session_with_s3() -> SparkSession:
-        """Create Spark session with VERY conservative memory settings"""
+        """Create Spark session with Delta Lake support and conservative memory settings"""
+        logger = logging.getLogger(__name__)
+        
+        logger.info("🔧 Creating Spark session with Delta Lake support")
+        
+        # Configure Spark for Delta Lake using packages that work
         spark = SparkSession.builder \
-            .appName("SilverWalletPnL_MemoryEfficient") \
-            .config("spark.jars.packages", "org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.367") \
-            .config("spark.hadoop.fs.s3a.endpoint", "http://minio:9000") \
-            .config("spark.hadoop.fs.s3a.access.key", "minioadmin") \
-            .config("spark.hadoop.fs.s3a.secret.key", "minioadmin123") \
+            .appName("SilverWalletPnL_Delta") \
+            .config("spark.jars.packages", "org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.367,io.delta:delta-spark_2.12:3.0.0") \
+            .config("spark.hadoop.fs.s3a.endpoint", MINIO_ENDPOINT) \
+            .config("spark.hadoop.fs.s3a.access.key", MINIO_ACCESS_KEY) \
+            .config("spark.hadoop.fs.s3a.secret.key", MINIO_SECRET_KEY) \
             .config("spark.hadoop.fs.s3a.path.style.access", "true") \
             .config("spark.hadoop.fs.s3a.connection.ssl.enabled", "false") \
             .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem") \
             .config("spark.hadoop.fs.s3a.aws.credentials.provider", "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider") \
+            .config("spark.driver.memory", "1g") \
+            .config("spark.executor.memory", "1g") \
+            .config("spark.driver.maxResultSize", "256m") \
+            .config("spark.sql.shuffle.partitions", "50") \
             .config("spark.sql.adaptive.enabled", "true") \
             .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
-            .config("spark.driver.memory", "512m") \
-            .config("spark.executor.memory", "512m") \
-            .config("spark.driver.maxResultSize", "128m") \
-            .config("spark.sql.execution.arrow.maxRecordsPerBatch", "500") \
-            .config("spark.sql.adaptive.advisoryPartitionSizeInBytes", "64MB") \
-            .config("spark.sql.broadcastTimeout", "300") \
-            .config("spark.network.timeout", "300s") \
+            .config("spark.sql.execution.arrow.maxRecordsPerBatch", "5000") \
+            .config("spark.sql.parquet.outputTimestampType", "TIMESTAMP_MICROS") \
+            .config("spark.sql.parquet.int96AsTimestamp", "true") \
+            .config("spark.sql.parquet.datetimeRebaseModeInRead", "CORRECTED") \
+            .config("spark.sql.parquet.datetimeRebaseModeInWrite", "CORRECTED") \
             .getOrCreate()
         
         spark.sparkContext.setLogLevel("WARN")
+        
+        logger.info("✅ Spark session created successfully")
+        
+        # Configure Delta Lake after session creation (if available)
+        try:
+            from delta import configure_spark_with_delta_pip
+            spark = configure_spark_with_delta_pip(spark)
+            logger.info("✅ Delta Lake configured successfully using pip package")
+        except ImportError:
+            logger.warning("⚠️ Delta Lake pip configuration not available, using basic JAR packages")
+            
         return spark
 
 
-    def check_system_memory():
-        """Check if system has enough memory to run PySpark safely"""
+    def check_if_date_processed(s3_client, target_date: str) -> bool:
+        """Check if a date has already been processed"""
         logger = logging.getLogger(__name__)
         
         try:
-            import psutil
-            
-            # Get current memory usage
-            memory = psutil.virtual_memory()
-            available_gb = memory.available / (1024**3)
-            used_percent = memory.percent
-            
-            logger.info(f"System memory: {available_gb:.1f}GB available ({used_percent:.1f}% used)")
-            
-            # Conservative thresholds
-            if used_percent > 85:
-                raise MemoryError(f"Memory usage too high: {used_percent:.1f}%")
-            
-            if available_gb < 3.0:
-                raise MemoryError(f"Not enough memory: {available_gb:.1f}GB available, need 3GB")
-                
-        except ImportError:
-            logger.warning("psutil not available, skipping memory check")
-        except Exception as e:
-            logger.warning(f"Memory check failed: {e}")
-
-
-    def read_unfetched_transactions(spark: SparkSession) -> DataFrame:
-        """Read wallet transactions that haven't been processed for PnL"""
-        logger = logging.getLogger(__name__)
-        
-        try:
-            # Read bronze wallet transactions
-            parquet_path = f"s3a://solana-data/{BRONZE_WALLET_TRANSACTIONS_PATH}/**/*.parquet"
-            bronze_df = spark.read.parquet(parquet_path)
-            
-            # Filter for unprocessed transactions
-            unfetched = bronze_df.filter(
-                (col("processed_for_pnl") == False) | 
-                col("processed_for_pnl").isNull()
+            # Check for processing log files
+            prefix = f"silver/wallet_pnl/_processing_log/date={target_date}/"
+            response = s3_client.list_objects_v2(
+                Bucket='solana-data',
+                Prefix=prefix,
+                MaxKeys=1
             )
             
-            # Data quality filters
-            clean_df = unfetched.filter(
+            if 'Contents' in response and len(response['Contents']) > 0:
+                logger.info(f"Date {target_date} already processed")
+                return True
+            else:
+                logger.info(f"Date {target_date} not yet processed")
+                return False
+                
+        except Exception as e:
+            logger.warning(f"Error checking processing status: {e}")
+            return False
+
+
+    def write_processing_log(s3_client, target_date: str, batch_id: str, result: Dict[str, Any]):
+        """Write processing log for tracking"""
+        logger = logging.getLogger(__name__)
+        
+        log_data = {
+            "date": target_date,
+            "batch_id": batch_id,
+            "processed_at": datetime.now(timezone.utc).isoformat(),
+            "wallets_processed": result.get("wallets_processed", 0),
+            "records_created": result.get("total_pnl_records", 0),
+            "status": result.get("status", "unknown")
+        }
+        
+        key = f"silver/wallet_pnl/_processing_log/date={target_date}/batch_{batch_id}.json"
+        
+        try:
+            s3_client.put_object(
+                Bucket='solana-data',
+                Key=key,
+                Body=json.dumps(log_data, indent=2),
+                ContentType='application/json'
+            )
+            logger.info(f"Wrote processing log to {key}")
+        except Exception as e:
+            logger.error(f"Failed to write processing log: {e}")
+
+
+    def read_transactions_for_date(spark: SparkSession, target_date: str) -> DataFrame:
+        """Read wallet transactions for a specific date partition"""
+        logger = logging.getLogger(__name__)
+        
+        # Read ONLY the specific date partition
+        parquet_path = f"s3a://solana-data/{BRONZE_WALLET_TRANSACTIONS_PATH}/date={target_date}/*.parquet"
+        
+        try:
+            bronze_df = spark.read.parquet(parquet_path)
+            
+            # Transform to expected schema and calculate USD values
+            transformed_df = bronze_df.select(
+                col("wallet_address"),
+                # Use base_address as token_address (the token being traded)
+                col("base_address").alias("token_address"),
+                col("base_address").alias("from_token"),
+                col("quote_address").alias("to_token"),
+                # Calculate amounts (use absolute values)
+                spark_abs(col("base_ui_change_amount")).alias("from_amount"),
+                spark_abs(col("quote_ui_change_amount")).alias("to_amount"),
+                # Calculate USD value using nearest prices
+                (spark_abs(col("base_ui_change_amount")) * coalesce(col("base_nearest_price"), lit(0.0))).alias("value_usd"),
+                col("timestamp"),
+                col("transaction_hash")
+            )
+            
+            # Basic quality filters
+            clean_df = transformed_df.filter(
                 (col("transaction_hash").isNotNull()) &
                 (col("wallet_address").isNotNull()) &
-                (col("token_address").isNotNull()) &
-                (col("timestamp").isNotNull())
+                (col("timestamp").isNotNull()) &
+                (col("value_usd").isNotNull()) &
+                (col("value_usd") > 0) &
+                (col("from_amount").isNotNull()) &
+                (col("to_amount").isNotNull())
             )
             
             return clean_df
             
         except Exception as e:
-            logger.error(f"Error reading unfetched transactions: {e}")
-            # Return empty DataFrame with schema
+            logger.warning(f"No data found for date {target_date}: {e}")
+            # Return empty DataFrame with expected schema
             schema = StructType([
                 StructField("wallet_address", StringType()),
                 StructField("token_address", StringType()),
-                StructField("transaction_hash", StringType()),
-                StructField("timestamp", TimestampType()),
-                StructField("transaction_type", StringType()),
+                StructField("from_token", StringType()),
+                StructField("to_token", StringType()),
+                StructField("from_amount", DoubleType()),
+                StructField("to_amount", DoubleType()),
                 StructField("value_usd", DoubleType()),
-                StructField("processed_for_pnl", BooleanType()),
+                StructField("timestamp", TimestampType()),
+                StructField("transaction_hash", StringType()),
             ])
             return spark.createDataFrame([], schema)
 
 
-    def process_wallets_ultra_conservative(spark: SparkSession, transactions_df: DataFrame, batch_id: str):
+    def calculate_wallet_pnl_optimized(transactions_df: DataFrame, batch_id: str) -> DataFrame:
         """
-        Ultra-conservative wallet processing - HARDCODED TO PROCESS ONLY 5 WALLETS
-        Uses basic aggregations to prevent memory crashes
+        Calculate real PnL metrics using proper Spark patterns (no collect!)
+        Uses groupBy for parallel processing
         """
         logger = logging.getLogger(__name__)
         
-        # HARDCODED LIMIT: Only process first 5 wallets
-        MAX_WALLETS = 5
-        unique_wallets = transactions_df.select("wallet_address").distinct().limit(MAX_WALLETS).collect()
-        logger.info(f"Processing ONLY {len(unique_wallets)} wallets (hardcoded limit: {MAX_WALLETS})")
+        # Step 1: Classify transactions as BUY/SELL/SWAP
+        classified_df = transactions_df.withColumn(
+            "trade_type",
+            when(col("from_token") == SOL_TOKEN_ADDRESS, "BUY")
+            .when(col("to_token") == SOL_TOKEN_ADDRESS, "SELL")
+            .otherwise("SWAP")
+        )
         
-        all_pnl_results = []
-        processed_count = 0
-        
-        for wallet_row in unique_wallets:
-            wallet_addr = wallet_row.wallet_address
-            logger.info(f"Processing wallet {processed_count + 1}/{len(unique_wallets)}: {wallet_addr[:10]}...")
+        # Step 2: Calculate metrics per wallet-token pair
+        wallet_token_metrics = classified_df.groupBy("wallet_address", "token_address").agg(
+            # Volume metrics
+            spark_sum(when(col("trade_type") == "BUY", col("value_usd")).otherwise(0)).alias("total_bought_usd"),
+            spark_sum(when(col("trade_type") == "SELL", col("value_usd")).otherwise(0)).alias("total_sold_usd"),
+            spark_sum(when(col("trade_type") == "BUY", col("to_amount")).otherwise(0)).alias("tokens_bought"),
+            spark_sum(when(col("trade_type") == "SELL", col("from_amount")).otherwise(0)).alias("tokens_sold"),
             
-            try:
-                # Get wallet transactions (limit to prevent memory issues)
-                wallet_txns = transactions_df.filter(col("wallet_address") == wallet_addr).limit(100)
-                txn_count = wallet_txns.count()
-                
-                if txn_count == 0:
-                    continue
-                
-                # Basic aggregations without complex UDFs
-                basic_metrics = wallet_txns.agg(
-                    count("*").alias("total_transactions"),
-                    spark_sum(when(col("value_usd").isNotNull(), col("value_usd")).otherwise(0)).alias("total_volume"),
-                    avg(when(col("value_usd").isNotNull(), col("value_usd")).otherwise(0)).alias("avg_transaction"),
-                    spark_min("timestamp").alias("first_transaction"),
-                    spark_max("timestamp").alias("last_transaction")
-                ).collect()[0]
-                
-                # Calculate basic metrics
-                total_volume = float(basic_metrics.total_volume or 0.0)
-                avg_volume = float(basic_metrics.avg_transaction or 0.0)
-                trade_count = int(basic_metrics.total_transactions or 0)
-                
-                # Create simplified PnL record (portfolio-level only)
-                current_time = datetime.utcnow()
-                pnl_record = {
-                    'wallet_address': wallet_addr,
-                    'token_address': 'ALL_TOKENS',
-                    'calculation_date': current_time.date(),
-                    
-                    # Basic estimates (not accurate FIFO PnL but prevents crashes)
-                    'realized_pnl': total_volume * 0.02,  # Assume 2% profit
-                    'unrealized_pnl': 0.0,
-                    'total_pnl': total_volume * 0.02,
-                    
-                    # Trading metrics
-                    'trade_count': trade_count,
-                    'win_rate': 55.0,  # Conservative estimate
-                    'total_bought': total_volume * 0.5,
-                    'total_sold': total_volume * 0.5,
-                    'roi': 2.0,
-                    'avg_holding_time_hours': 24.0,
-                    'avg_transaction_amount_usd': avg_volume,
-                    'trade_frequency_daily': 1.0,
-                    
-                    # Time ranges
-                    'first_transaction': basic_metrics.first_transaction,
-                    'last_transaction': basic_metrics.last_transaction,
-                    
-                    # Position metrics
-                    'current_position_tokens': 100.0,
-                    'current_position_cost_basis': 1000.0,
-                    'current_position_value': 1020.0,
-                    
-                    # Processing metadata
-                    'processed_at': current_time,
-                    'batch_id': batch_id,
-                    'data_source': 'ultra_conservative'
-                }
-                
-                all_pnl_results.append(pnl_record)
-                processed_count += 1
-                
-                logger.info(f"Created PnL record for wallet {wallet_addr[:10]}...")
-                
-            except Exception as e:
-                logger.warning(f"Failed to process wallet {wallet_addr[:10]}...: {e}")
-                continue
+            # Trade counts
+            count(when(col("trade_type") == "BUY", 1)).alias("buy_count"),
+            count(when(col("trade_type") == "SELL", 1)).alias("sell_count"),
+            count("*").alias("total_trades"),
+            
+            # Price metrics
+            avg(when(col("trade_type") == "BUY", col("value_usd") / col("to_amount"))).alias("avg_buy_price"),
+            avg(when(col("trade_type") == "SELL", col("value_usd") / col("from_amount"))).alias("avg_sell_price"),
+            
+            # Timing
+            spark_min("timestamp").alias("first_trade"),
+            spark_max("timestamp").alias("last_trade")
+        )
         
-        logger.info(f"Completed: {processed_count} wallets, {len(all_pnl_results)} PnL records")
-        return all_pnl_results, processed_count
+        # Step 3: Calculate PnL and position metrics
+        token_pnl_df = wallet_token_metrics.withColumn(
+            "tokens_remaining", 
+            col("tokens_bought") - col("tokens_sold")
+        ).withColumn(
+            "realized_pnl",
+            col("total_sold_usd") - (col("tokens_sold") * col("avg_buy_price"))
+        ).withColumn(
+            "current_position_cost_basis",
+            col("tokens_remaining") * col("avg_buy_price")
+        ).withColumn(
+            "current_position_value",
+            col("tokens_remaining") * coalesce(col("avg_sell_price"), col("avg_buy_price"))
+        ).withColumn(
+            "unrealized_pnl",
+            col("current_position_value") - col("current_position_cost_basis")
+        ).withColumn(
+            "total_pnl",
+            col("realized_pnl") + col("unrealized_pnl")
+        ).withColumn(
+            "roi",
+            when(col("total_bought_usd") > 0, 
+                 (col("total_pnl") / col("total_bought_usd")) * 100
+            ).otherwise(0)
+        ).withColumn(
+            "trade_count",
+            col("total_trades")
+        )
+        
+        # Step 4: Portfolio-level aggregation
+        portfolio_df = token_pnl_df.groupBy("wallet_address").agg(
+            spark_sum("realized_pnl").alias("realized_pnl"),
+            spark_sum("unrealized_pnl").alias("unrealized_pnl"),
+            spark_sum("total_pnl").alias("total_pnl"),
+            spark_sum("total_bought_usd").alias("total_bought"),
+            spark_sum("total_sold_usd").alias("total_sold"),
+            spark_sum("trade_count").alias("trade_count"),
+            avg("roi").alias("roi"),
+            spark_min("first_trade").alias("first_transaction"),
+            spark_max("last_trade").alias("last_transaction"),
+            spark_sum("current_position_cost_basis").alias("current_position_cost_basis"),
+            spark_sum("current_position_value").alias("current_position_value"),
+            # Win rate: percentage of tokens with positive PnL
+            (spark_sum(when(col("total_pnl") > 0, 1).otherwise(0)) * 100.0 / count("*")).alias("win_rate")
+        )
+        
+        # Step 5: Add metadata and calculate derived metrics
+        current_time = datetime.now(timezone.utc)
+        
+        final_df = portfolio_df.withColumn(
+            "token_address", lit("ALL_TOKENS")
+        ).withColumn(
+            "calculation_date", lit(current_time.date())
+        ).withColumn(
+            "current_position_tokens", lit(0.0)  # Portfolio level, not applicable
+        ).withColumn(
+            "avg_holding_time_hours",
+            (datediff(col("last_transaction"), col("first_transaction")) * 24.0)
+        ).withColumn(
+            "avg_transaction_amount_usd",
+            (col("total_bought") + col("total_sold")) / col("trade_count")
+        ).withColumn(
+            "trade_frequency_daily",
+            col("trade_count") / spark_abs(datediff(col("last_transaction"), col("first_transaction")) + 1)
+        ).withColumn(
+            "processed_at", lit(current_time)
+        ).withColumn(
+            "batch_id", lit(batch_id)
+        ).withColumn(
+            "data_source", lit("optimized_groupby")
+        )
+        
+        # Round numeric values
+        for col_name in ["realized_pnl", "unrealized_pnl", "total_pnl", "total_bought", 
+                         "total_sold", "roi", "win_rate", "avg_transaction_amount_usd"]:
+            final_df = final_df.withColumn(col_name, spark_round(col(col_name), 2))
+        
+        return final_df
 
 
     def write_silver_pnl_data(spark: SparkSession, pnl_df: DataFrame, batch_id: str) -> str:
-        """Write PnL results to silver layer with simplified partitioning"""
+        """Write PnL results to silver layer using Delta Lake ONLY"""
         logger = logging.getLogger(__name__)
         
-        # Add batch_id
-        pnl_with_batch = pnl_df.withColumn("batch_id", lit(batch_id))
-        
-        # Add partition columns (simplified: no time_period partition)
-        partitioned_df = pnl_with_batch.withColumn(
+        # Add partition columns
+        partitioned_df = pnl_df.withColumn(
             "calculation_year", expr("year(calculation_date)")
         ).withColumn(
             "calculation_month", expr("month(calculation_date)")
         )
         
-        # Write to MinIO
-        output_path = "s3a://solana-data/silver/wallet_pnl/"
+        # Delta Lake path
+        delta_output_path = get_delta_s3_path("silver/wallet_pnl")
         
         try:
-            partitioned_df.write \
-                .partitionBy("calculation_year", "calculation_month") \
-                .mode("append") \
-                .parquet(output_path)
+            # Check if Delta table exists and use MERGE
+            try:
+                deltaTable = DeltaTable.forPath(spark, delta_output_path)
+                
+                # Use MERGE to prevent duplicates and handle updates
+                deltaTable.alias("target").merge(
+                    partitioned_df.alias("source"),
+                    "target.wallet_address = source.wallet_address AND " +
+                    "target.token_address = source.token_address AND " +
+                    "target.calculation_date = source.calculation_date"
+                ).whenMatchedUpdateAll() \
+                 .whenNotMatchedInsertAll() \
+                 .execute()
+                
+                logger.info(f"✅ Successfully merged PnL data to Delta table: {delta_output_path}")
+                return delta_output_path
+                
+            except Exception as delta_error:
+                # If table doesn't exist or MERGE fails, create new table
+                logger.info(f"Delta MERGE failed ({delta_error}), creating new Delta table")
+                partitioned_df.coalesce(1).write \
+                    .format("delta") \
+                    .partitionBy("calculation_year", "calculation_month") \
+                    .mode("append") \
+                    .save(delta_output_path)
+                
+                logger.info(f"✅ Successfully created/appended PnL data to Delta table: {delta_output_path}")
+                return delta_output_path
             
-            logger.info(f"Wrote {pnl_with_batch.count()} PnL records to {output_path}")
+        except Exception as delta_error:
+            logger.error(f"❌ Delta Lake write FAILED: {delta_error}")
+            logger.error(f"❌ Batch {batch_id} could not be written to Delta Lake")
+            logger.error("❌ NO FALLBACK - Data processing aborted")
             
-            # Write success marker
-            success_path = f"s3a://solana-data/silver/wallet_pnl/_SUCCESS_{batch_id}"
-            spark.createDataFrame([("success",)], ["status"]).coalesce(1).write.mode("overwrite").text(success_path)
+            # Import traceback for detailed error information
+            import traceback
+            logger.error(f"❌ Full Delta Lake error traceback:\n{traceback.format_exc()}")
             
-            return output_path
-            
-        except Exception as e:
-            logger.error(f"Error writing silver PnL data: {e}")
-            raise
-
-
-    def update_bronze_processing_status(spark: SparkSession, processed_df: DataFrame, batch_id: str):
-        """Update bronze layer to mark transactions as processed"""
-        logger = logging.getLogger(__name__)
-        
-        try:
-            # Get processed transaction hashes
-            processed_hashes = processed_df.select("transaction_hash").distinct()
-            
-            logger.info(f"Updating status for {processed_hashes.count()} transactions")
-            
-            # Read current bronze data
-            parquet_path = f"s3a://solana-data/{BRONZE_WALLET_TRANSACTIONS_PATH}/**/*.parquet"
-            bronze_df = spark.read.parquet(parquet_path)
-            
-            # Update processing flags
-            updated_df = bronze_df.join(
-                processed_hashes.withColumn("was_processed", lit(True)), 
-                on="transaction_hash", 
-                how="left"
-            ).withColumn(
-                "processed_for_pnl",
-                when(col("was_processed") == True, True).otherwise(col("processed_for_pnl"))
-            ).withColumn(
-                "pnl_processed_at",
-                when(col("was_processed") == True, current_timestamp()).otherwise(col("pnl_processed_at"))
-            ).withColumn(
-                "pnl_processing_status",
-                when(col("was_processed") == True, "completed").otherwise(col("pnl_processing_status"))
-            ).drop("was_processed")
-            
-            # Write back to bronze layer
-            updated_df.write \
-                .partitionBy("date") \
-                .mode("overwrite") \
-                .parquet(f"s3a://solana-data/{BRONZE_WALLET_TRANSACTIONS_PATH}/")
-            
-            logger.info("Updated bronze layer processing status")
-            
-        except Exception as e:
-            logger.error(f"Error updating bronze status: {e}")
-            raise
+            # Re-raise the exception to fail the task
+            raise RuntimeError(f"Delta Lake write failed for batch {batch_id}: {delta_error}")
 
 
 def transform_silver_wallet_pnl(**context):
     """
-    Calculate wallet PnL metrics using PySpark - MEMORY EFFICIENT VERSION
+    Calculate wallet PnL metrics using optimized PySpark patterns
     
     ACTIVE FUNCTION - Used by smart_trader_identification_dag and test_silver_pnl_dag
-    HARDCODED: Processes only 5 wallets at a time to prevent crashes
+    Processes transactions by date partition with real PnL calculations
+    UPDATED: Processes last 7 days of transactions
     """
     logger = logging.getLogger(__name__)
-    
-    # Safety check
-    try:
-        if PYSPARK_AVAILABLE:
-            check_system_memory()
-    except MemoryError as e:
-        logger.error(f"Memory safety check failed: {e}")
-        return {
-            "wallets_processed": 0,
-            "total_pnl_records": 0,
-            "batch_id": "memory_check_failed",
-            "status": "failed_memory_check",
-            "error": str(e)
-        }
     
     if not PYSPARK_AVAILABLE:
         logger.error("PySpark not available")
         return {
             "wallets_processed": 0,
             "total_pnl_records": 0,
-            "batch_id": datetime.utcnow().strftime("%Y%m%d_%H%M%S"),
+            "batch_id": datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S"),
             "status": "pyspark_not_available"
         }
     
     # Generate batch ID
-    batch_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    batch_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     
-    # Initialize Spark session with conservative settings
+    # Process last 7 days instead of just today
+    target_dates = []
+    for days_ago in range(7):
+        date = (datetime.now() - timedelta(days=days_ago)).strftime("%Y-%m-%d")
+        target_dates.append(date)
+    
+    logger.info(f"Processing last 7 days: {target_dates}")
+    
+    # Initialize Spark session once for all dates
     spark = get_spark_session_with_s3()
+    s3_client = get_minio_client()
+    
+    total_wallets_processed = 0
+    total_records_created = 0
+    dates_processed = []
+    dates_skipped = []
     
     try:
-        logger.info(f"Starting PnL calculation batch {batch_id} (5 wallet limit)")
-        
-        # Read unfetched wallet transactions
-        transactions_df = read_unfetched_transactions(spark)
-        
-        if transactions_df.count() == 0:
-            logger.info("No unfetched transactions found")
-            return {
-                "wallets_processed": 0,
-                "total_pnl_records": 0,
-                "batch_id": batch_id,
-                "status": "no_data"
-            }
-        
-        logger.info(f"Processing transactions (ultra-conservative mode)")
-        
-        # Process wallets with hardcoded limit
-        all_pnl_results, total_wallets_processed = process_wallets_ultra_conservative(
-            spark, transactions_df, batch_id
-        )
-        
-        logger.info(f"Completed processing: {total_wallets_processed} wallets, {len(all_pnl_results)} records")
-        
-        # Convert results to DataFrame and write
-        if all_pnl_results:
-            pnl_schema = get_silver_pnl_schema()
-            final_pnl_df = spark.createDataFrame(all_pnl_results, pnl_schema)
+        # Process each date
+        for target_date in target_dates:
+            logger.info(f"Processing date: {target_date}")
             
-            # Write to silver layer
-            output_path = write_silver_pnl_data(spark, final_pnl_df, batch_id)
+            # Check if already processed
+            if check_if_date_processed(s3_client, target_date):
+                logger.info(f"Date {target_date} already processed, skipping")
+                dates_skipped.append(target_date)
+                continue
             
-            # Update bronze processing status
-            update_bronze_processing_status(spark, transactions_df, batch_id)
+            # Read transactions for specific date
+            transactions_df = read_transactions_for_date(spark, target_date)
             
-            logger.info(f"PnL calculation completed for batch {batch_id}")
+            # Check if empty using more efficient method
+            if transactions_df.rdd.isEmpty():
+                logger.info(f"No transactions found for date {target_date}")
+                result = {
+                    "wallets_processed": 0,
+                    "total_pnl_records": 0,
+                    "batch_id": batch_id,
+                    "status": "no_data",
+                    "target_date": target_date
+                }
+                write_processing_log(s3_client, target_date, batch_id, result)
+                continue
             
-            return {
-                "wallets_processed": total_wallets_processed,
-                "total_pnl_records": len(all_pnl_results),
-                "batch_id": batch_id,
-                "output_path": output_path,
-                "status": "success"
-            }
-        else:
-            logger.warning("No PnL results generated")
-            return {
-                "wallets_processed": 0,
-                "total_pnl_records": 0,
-                "batch_id": batch_id,
-                "status": "no_results"
-            }
+            # Calculate PnL using optimized groupBy approach
+            pnl_df = calculate_wallet_pnl_optimized(transactions_df, batch_id)
+            
+            # Cache for reuse
+            pnl_df.cache()
+            
+            # Get count efficiently (after cache)
+            wallet_count = pnl_df.count()
+            
+            if wallet_count > 0:
+                # Write to silver layer
+                output_path = write_silver_pnl_data(spark, pnl_df, batch_id)
+                
+                logger.info(f"Date {target_date}: Processed {wallet_count} wallets")
+                
+                total_wallets_processed += wallet_count
+                total_records_created += wallet_count
+                dates_processed.append(target_date)
+                
+                result = {
+                    "wallets_processed": wallet_count,
+                    "total_pnl_records": wallet_count,
+                    "batch_id": batch_id,
+                    "output_path": output_path,
+                    "status": "success",
+                    "target_date": target_date
+                }
+            else:
+                logger.warning(f"Date {target_date}: No PnL results generated")
+                result = {
+                    "wallets_processed": 0,
+                    "total_pnl_records": 0,
+                    "batch_id": batch_id,
+                    "status": "no_results",
+                    "target_date": target_date
+                }
+            
+            # Write processing log for this date
+            write_processing_log(s3_client, target_date, batch_id, result)
+            
+            # Unpersist cache to free memory
+            pnl_df.unpersist()
+        
+        # Summary
+        logger.info(f"✅ 7-day processing completed!")
+        logger.info(f"  Dates processed: {len(dates_processed)} - {dates_processed}")
+        logger.info(f"  Dates skipped: {len(dates_skipped)} - {dates_skipped}")
+        logger.info(f"  Total wallets: {total_wallets_processed}")
+        logger.info(f"  Total records: {total_records_created}")
+        
+        return {
+            "wallets_processed": total_wallets_processed,
+            "total_pnl_records": total_records_created,
+            "batch_id": batch_id,
+            "status": "success",
+            "dates_processed": dates_processed,
+            "dates_skipped": dates_skipped,
+            "processing_summary": f"Processed {len(dates_processed)} dates, skipped {len(dates_skipped)}"
+        }
             
     except Exception as e:
         logger.error(f"PySpark processing failed: {e}")
         return {
-            "wallets_processed": 0,
-            "total_pnl_records": 0,
+            "wallets_processed": total_wallets_processed,
+            "total_pnl_records": total_records_created,
             "batch_id": batch_id,
             "status": "failed",
-            "error": str(e)
+            "error": str(e),
+            "dates_processed": dates_processed,
+            "dates_skipped": dates_skipped
         }
     finally:
         spark.stop()

@@ -11,11 +11,12 @@ RUN apt-get update && \
 ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
 
 USER airflow
-# Install PySpark and other Python dependencies
+# Install PySpark and other Python dependencies with compatible versions
 RUN pip install --no-cache-dir \
     dbt-core \
     dbt-duckdb \
     pyspark==3.5.0 \
-    pyarrow \
-    boto3 \
-    botocore
+    pyarrow==12.0.1 \
+    boto3==1.26.137 \
+    botocore==1.29.137 \
+    delta-spark==3.1.0

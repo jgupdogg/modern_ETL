@@ -252,3 +252,47 @@ models:
         tests:
           - not_null
 
+
+
+  - name: silver_delta_tracked_tokens
+    description: "Filtered tracked tokens from TRUE Delta Lake bronze token metrics with basic liquidity filter"
+    columns:
+      - name: token_address
+        description: "Unique token contract address"
+        tests:
+          - unique
+          - not_null
+      
+      - name: symbol
+        description: "Token symbol"
+        tests:
+          - not_null
+      
+      - name: liquidity
+        description: "Token liquidity in USD (minimum $100K)"
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 100000"
+      
+      - name: liquidity_tier
+        description: "Liquidity tier categorization"
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['HIGH', 'MEDIUM', 'LOW', 'MINIMAL']
+      
+      - name: source_operation
+        description: "Source Delta Lake operation type"
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['BRONZE_TOKEN_CREATE', 'BRONZE_TOKEN_APPEND']
+      
+      - name: whale_fetch_status
+        description: "Status of whale data fetching"
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['pending', 'fetched', 'failed']
+

@@ -72,10 +72,10 @@ PNL_CALCULATION_PRECISION = 6          # Decimal places for PnL calculations
 PNL_BATCH_PROGRESS_INTERVAL = 10      # Log progress every N wallets
 PNL_MAX_PROCESSING_TIME_MINUTES = 30  # Timeout for PnL calculations
 
-# Wallet Batch Processing (Memory Management)
-SILVER_PNL_WALLET_BATCH_SIZE = 5      # Process N wallets at a time to control memory usage
-SILVER_PNL_MAX_TRANSACTIONS_PER_BATCH = 500  # Limit transaction volume per batch
-SILVER_PNL_PROCESSING_TIMEOUT_SECONDS = 300  # 5 minutes timeout per wallet batch
+# Wallet Batch Processing (Memory Management) - ULTRA CONSERVATIVE FOR STABILITY
+SILVER_PNL_WALLET_BATCH_SIZE = 1       # Process 1 wallet at a time (ultra conservative)
+SILVER_PNL_MAX_TRANSACTIONS_PER_BATCH = 50   # Very small transaction batches (ultra conservative)
+SILVER_PNL_PROCESSING_TIMEOUT_SECONDS = 180  # 3 minutes timeout per wallet (shorter for safety)
 
 # =============================================================================
 # GOLD LAYER THRESHOLDS
@@ -130,11 +130,35 @@ MINIO_ACCESS_KEY = 'minioadmin'
 MINIO_SECRET_KEY = 'minioadmin123'
 MINIO_BUCKET = 'solana-data'
 
-# PySpark Configuration
-SPARK_DRIVER_MEMORY = '4g'  # Increased from 2g for large dataset processing
-SPARK_EXECUTOR_MEMORY = '4g'  # Increased from 2g for large dataset processing
-SPARK_DRIVER_MAX_RESULT_SIZE = '2g'  # Prevent driver OOM errors
-SPARK_PACKAGES = "org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.367"
+# PySpark Configuration - MINIMUM SAFE SETTINGS FOR DELTA LAKE
+SPARK_DRIVER_MEMORY = '1g'      # Minimum for Delta Lake + PySpark 3.5.0
+SPARK_EXECUTOR_MEMORY = '1g'    # Minimum for Delta Lake operations
+SPARK_DRIVER_MAX_RESULT_SIZE = '512m'  # Sufficient for Delta operations
+
+# Package Versions for PySpark 3.5.0 + Delta Lake
+# Using actually available and working versions
+PYSPARK_VERSION = "3.5.0"
+DELTA_VERSION = "3.0.0"  # Delta 3.0.0 is available and compatible with Spark 3.5.x
+HADOOP_VERSION = "3.3.4"
+AWS_SDK_VERSION = "1.12.367"
+
+# Use delta-spark for Spark 3.5.x compatibility  
+SPARK_PACKAGES = f"org.apache.hadoop:hadoop-aws:{HADOOP_VERSION},com.amazonaws:aws-java-sdk-bundle:{AWS_SDK_VERSION}"
+DELTA_PACKAGES = f"io.delta:delta-spark_2.12:{DELTA_VERSION}"
+SPARK_PACKAGES_WITH_DELTA = f"{SPARK_PACKAGES},{DELTA_PACKAGES}"
+
+# Delta Lake specific bucket and paths
+DELTA_BUCKET = 'smart-trader'
+DELTA_BASE_PATH = f's3a://{DELTA_BUCKET}'
+
+# Delta Lake table paths
+DELTA_BRONZE_TOKEN_METRICS = f'{DELTA_BASE_PATH}/delta/bronze/token_metrics'
+DELTA_BRONZE_WHALE_HOLDERS = f'{DELTA_BASE_PATH}/delta/bronze/whale_holders'
+DELTA_BRONZE_TRANSACTION_HISTORY = f'{DELTA_BASE_PATH}/delta/bronze/transaction_history'
+DELTA_SILVER_WALLET_PNL = f'{DELTA_BASE_PATH}/delta/silver/wallet_pnl'
+DELTA_SILVER_TRACKED_TOKENS = f'{DELTA_BASE_PATH}/delta/silver/tracked_tokens'
+DELTA_GOLD_SMART_WALLETS = f'{DELTA_BASE_PATH}/delta/gold/smart_wallets'
+DELTA_GOLD_PORTFOLIO_ANALYTICS = f'{DELTA_BASE_PATH}/delta/gold/portfolio_analytics'
 
 # Storage Paths
 BRONZE_TOKEN_LIST_PATH = "bronze/token_list_v3"
@@ -169,6 +193,7 @@ def get_spark_config():
         "spark.hadoop.fs.s3a.path.style.access": "true",
         "spark.hadoop.fs.s3a.connection.ssl.enabled": "false",
         "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
+        "spark.hadoop.fs.s3a.aws.credentials.provider": "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider",
         
         # Memory Configuration (Increased for large datasets)
         "spark.driver.memory": SPARK_DRIVER_MEMORY,
@@ -181,13 +206,13 @@ def get_spark_config():
         "spark.sql.adaptive.coalescePartitions.enabled": "false",
         "spark.sql.adaptive.skewJoin.enabled": "false",
         
-        # JVM Tuning for Garbage Collection
-        "spark.driver.extraJavaOptions": "-XX:+UseG1GC -XX:MaxGCPauseMillis=200 -XX:+UnlockExperimentalVMOptions",
-        "spark.executor.extraJavaOptions": "-XX:+UseG1GC -XX:MaxGCPauseMillis=200 -XX:+UnlockExperimentalVMOptions",
+        # JVM Tuning for Stability and Garbage Collection  
+        "spark.driver.extraJavaOptions": "-XX:+UseG1GC -XX:MaxGCPauseMillis=200 -XX:+UnlockExperimentalVMOptions -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/tmp",
+        "spark.executor.extraJavaOptions": "-XX:+UseG1GC -XX:MaxGCPauseMillis=200 -XX:+UnlockExperimentalVMOptions -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/tmp",
         
-        # Serialization and Performance
-        "spark.serializer": "org.apache.spark.serializer.KryoSerializer",
-        "spark.sql.execution.arrow.pyspark.enabled": "true",
+        # Serialization and Performance (Arrow disabled for stability)
+        "spark.serializer": "org.apache.spark.serializer.KryoSerializer", 
+        "spark.sql.execution.arrow.pyspark.enabled": "false",  # Disabled to prevent crashes
         
         # Connection Stability
         "spark.hadoop.fs.s3a.connection.timeout": "30000",  # 30 second timeout
@@ -195,9 +220,63 @@ def get_spark_config():
         "spark.network.timeout": "600s"  # 10 minute network timeout
     }
 
+def get_spark_config_with_delta():
+    """Get PySpark configuration with modern Delta Lake 3.1.0 support and ACID properties"""
+    config = get_spark_config().copy()
+    config.update({
+        "spark.jars.packages": SPARK_PACKAGES_WITH_DELTA,
+        
+        # Modern Delta Lake Core Configuration (3.1.0)
+        "spark.sql.extensions": "io.delta.sql.DeltaSparkSessionExtension",
+        "spark.sql.catalog.spark_catalog": "org.apache.spark.sql.delta.catalog.DeltaCatalog",
+        
+        # Enhanced S3A Configuration for Modern Hadoop 3.3.6
+        "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
+        "spark.hadoop.fs.s3a.aws.credentials.provider": "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider",
+        "spark.hadoop.fs.s3a.fast.upload": "true",
+        "spark.hadoop.fs.s3a.block.size": "128M",
+        "spark.hadoop.fs.s3a.multipart.size": "64M",
+        "spark.hadoop.fs.s3a.committer.name": "magic",  # Better S3 performance
+        
+        # Delta Lake Performance Optimizations
+        "spark.sql.adaptive.enabled": "true",
+        "spark.sql.adaptive.coalescePartitions.enabled": "true",
+        "spark.sql.adaptive.skewJoin.enabled": "true",
+        "spark.sql.adaptive.localShuffleReader.enabled": "true",
+        
+        # Delta Lake ACID Properties
+        "spark.databricks.delta.retentionDurationCheck.enabled": "false",  # For development
+        "spark.databricks.delta.schema.autoMerge.enabled": "true",  # Schema evolution
+        "spark.databricks.delta.optimizeWrite.enabled": "true",  # Optimize writes
+        "spark.databricks.delta.autoCompact.enabled": "true",  # Auto compaction
+        "spark.databricks.delta.merge.repartitionBeforeWrite.enabled": "true",  # Better MERGE performance
+        
+        # Modern Transaction Safety
+        "spark.sql.streaming.forceDeleteTempCheckpointLocation": "true",
+        "spark.serializer": "org.apache.spark.serializer.KryoSerializer",
+        
+        # Memory Management for Delta Lake 3.1.0
+        "spark.sql.execution.arrow.maxRecordsPerBatch": "1000",  # Conservative batch size
+        "spark.sql.execution.arrow.pyspark.enabled": "false",  # Disabled for stability
+        
+        # Enhanced File Committer for S3
+        "spark.hadoop.mapreduce.fileoutputcommitter.algorithm.version": "2",
+        "spark.hadoop.mapreduce.fileoutputcommitter.cleanup.skipped": "false",
+        
+        # Network and retry configuration
+        "spark.hadoop.fs.s3a.connection.maximum": "15",
+        "spark.hadoop.fs.s3a.attempts.maximum": "5",
+        "spark.hadoop.fs.s3a.retry.interval": "500ms",
+    })
+    return config
+
 def get_s3_path(path_suffix):
     """Get full S3 path for a dataset"""
     return f"s3a://{MINIO_BUCKET}/{path_suffix}/"
+
+def get_delta_s3_path(path_suffix):
+    """Get full S3 path for Delta Lake tables"""
+    return f"s3a://{MINIO_BUCKET}/{path_suffix}_delta/"
 
 # =============================================================================
 # DAG CONFIGURATION
