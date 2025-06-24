@@ -104,7 +104,7 @@ class TrueDeltaLakeManager:
             self.logger.error(f"❌ Spark session test failed: {e}")
             raise
     
-    def create_table(self, df: DataFrame, table_path: str, partition_cols: List[str] = None) -> int:
+    def create_table(self, df: DataFrame, table_path: str, partition_cols: List[str] = None, merge_schema: bool = True) -> int:
         """
         Create Delta table with automatic version 0 and _delta_log
         
@@ -112,18 +112,28 @@ class TrueDeltaLakeManager:
             df: Spark DataFrame to write
             table_path: S3A path for Delta table  
             partition_cols: Columns to partition by
+            merge_schema: Enable schema evolution for existing tables
             
         Returns:
             Version number (should be 0 for new table)
         """
-        self.logger.info(f"🏗️ Creating TRUE Delta table: {table_path}")
+        self.logger.info(f"🏗️ Creating/updating TRUE Delta table: {table_path}")
         
         try:
             # Add Delta metadata columns
             df_with_metadata = df.withColumn("_delta_timestamp", current_timestamp()) \
                                 .withColumn("_delta_created_at", lit(datetime.now().isoformat()))
             
-            writer = df_with_metadata.write.format("delta").mode("overwrite")
+            # Check if table exists
+            table_exists = DeltaTable.isDeltaTable(self.spark, table_path)
+            
+            if table_exists and merge_schema:
+                # Table exists - use append with mergeSchema to evolve schema
+                self.logger.info("📝 Table exists - using schema evolution")
+                writer = df_with_metadata.write.format("delta").mode("append").option("mergeSchema", "true")
+            else:
+                # New table or overwrite requested
+                writer = df_with_metadata.write.format("delta").mode("overwrite")
             
             if partition_cols:
                 writer = writer.partitionBy(*partition_cols)
@@ -139,11 +149,11 @@ class TrueDeltaLakeManager:
             version = self.get_table_version(table_path)
             record_count = df.count()
             
-            self.logger.info(f"✅ Delta table created successfully!")
+            self.logger.info(f"✅ Delta table created/updated successfully!")
             self.logger.info(f"   Path: {table_path}")
             self.logger.info(f"   Version: {version}")
             self.logger.info(f"   Records: {record_count}")
-            self.logger.info(f"   _delta_log: Created automatically")
+            self.logger.info(f"   Schema merged: {table_exists and merge_schema}")
             
             return version
             
@@ -151,13 +161,14 @@ class TrueDeltaLakeManager:
             self.logger.error(f"❌ Failed to create Delta table {table_path}: {e}")
             raise
     
-    def append_data(self, df: DataFrame, table_path: str) -> int:
+    def append_data(self, df: DataFrame, table_path: str, merge_schema: bool = True) -> int:
         """
         Append data to Delta table creating new version automatically
         
         Args:
             df: DataFrame to append
             table_path: Delta table path
+            merge_schema: Enable schema evolution if new columns exist
             
         Returns:
             New version number
@@ -172,8 +183,12 @@ class TrueDeltaLakeManager:
             df_with_metadata = df.withColumn("_delta_timestamp", current_timestamp()) \
                                 .withColumn("_delta_operation", lit("APPEND"))
             
-            # Append to Delta table (automatic version increment via _delta_log)
-            df_with_metadata.write.format("delta").mode("append").save(table_path)
+            # Append to Delta table with optional schema merging
+            writer = df_with_metadata.write.format("delta").mode("append")
+            if merge_schema:
+                writer = writer.option("mergeSchema", "true")
+            
+            writer.save(table_path)
             
             version = self.get_table_version(table_path)
             record_count = df.count()
@@ -181,6 +196,7 @@ class TrueDeltaLakeManager:
             self.logger.info(f"✅ Data appended successfully!")
             self.logger.info(f"   New version: {version}")
             self.logger.info(f"   Records added: {record_count}")
+            self.logger.info(f"   Schema merged: {merge_schema}")
             
             return version
             
