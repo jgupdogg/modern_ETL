@@ -57,6 +57,12 @@ def create_silver_tracked_tokens(**context):
     logger = logging.getLogger(__name__)
     
     try:
+        # Memory safety check
+        import psutil
+        available_memory = psutil.virtual_memory().available / (1024**3)  # GB
+        if available_memory < 2.0:
+            logger.warning(f"Low memory: {available_memory:.1f}GB available, proceeding with minimal processing")
+            # Could return early or use smaller batch sizes
         from utils.true_delta_manager import TrueDeltaLakeManager
         from pyspark.sql.functions import col, lit, current_timestamp, row_number, when, coalesce
         from pyspark.sql.window import Window

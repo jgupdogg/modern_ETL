@@ -26,17 +26,20 @@ DELTA_SPARK_CONFIG = {
     "spark.hadoop.fs.s3a.path.style.access": "true", 
     "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
     
-    # Performance optimizations
-    "spark.sql.adaptive.enabled": "true",
-    "spark.sql.adaptive.coalescePartitions.enabled": "true", 
-    "spark.driver.memory": "1g",  # Reduced for Docker environment
-    "spark.executor.memory": "1g",  # Reduced for Docker environment
-    "spark.driver.maxResultSize": "512m",  # Prevent OOM
+    # Performance optimizations - ULTRA CONSERVATIVE for Docker
+    "spark.sql.adaptive.enabled": "false",  # Disable adaptive query execution
+    "spark.sql.adaptive.coalescePartitions.enabled": "false", 
+    "spark.driver.memory": "512m",  # Ultra conservative for Docker
+    "spark.executor.memory": "512m",  # Ultra conservative for Docker  
+    "spark.driver.maxResultSize": "256m",  # Prevent OOM
+    "spark.sql.execution.arrow.pyspark.enabled": "false",  # Disable Arrow for stability
     
-    # Docker-specific optimizations
+    # Docker-specific optimizations - MINIMAL RESOURCE USAGE
     "spark.executor.instances": "1",  # Single executor in Docker
-    "spark.sql.shuffle.partitions": "200",  # Default partitions
+    "spark.sql.shuffle.partitions": "10",  # Minimal partitions to reduce memory
     "spark.network.timeout": "300s",  # Increase timeout for Docker
+    "spark.executor.cores": "1",  # Single core to avoid contention
+    "spark.task.maxFailures": "1",  # Fail fast on memory issues
     
     # Delta Lake optimizations
     "spark.databricks.delta.retentionDurationCheck.enabled": "false",
