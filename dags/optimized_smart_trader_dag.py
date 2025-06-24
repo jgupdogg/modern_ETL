@@ -148,65 +148,63 @@ def create_silver_tracked_whales(**context):
         
         delta_manager = TrueDeltaLakeManager()
         
-        # Check if we have silver tracked tokens to process
-        silver_tokens_path = "s3a://smart-trader/silver/tracked_tokens_delta"
-        if not delta_manager.table_exists(silver_tokens_path):
-            logger.warning("Silver tracked tokens table not found - skipping whales creation")
+        # Read bronze whale holders from Delta Lake (now should exist after bronze_whales task)
+        bronze_whales_path = "s3a://smart-trader/bronze/whale_holders"
+        if not delta_manager.table_exists(bronze_whales_path):
+            logger.warning("Bronze whale holders table not found")
             return {"status": "no_source", "records": 0}
         
-        # For now, create a placeholder silver whales table since bronze whales might not exist yet
-        # This will be populated by the bronze whale fetching task later
-        silver_tokens_df = delta_manager.spark.read.format("delta").load(silver_tokens_path)
+        bronze_df = delta_manager.spark.read.format("delta").load(bronze_whales_path)
         
-        # Create minimal whale records for each token to enable downstream processing
-        placeholder_whales_df = silver_tokens_df.select(
-            "token_address", "symbol", "name"
+        # Apply silver layer transformations (similar to dbt model)
+        filtered_df = bronze_df.filter(
+            col("wallet_address").isNotNull() &
+            col("token_address").isNotNull() &
+            (col("holdings_amount") > 0)
+        )
+        
+        # Add whale tiers and processing fields
+        window_spec = Window.partitionBy("wallet_address", "token_address").orderBy(col("rank_date").desc(), col("_delta_timestamp").desc())
+        
+        silver_df = filtered_df.withColumn(
+            "whale_id", concat(col("wallet_address"), lit("_"), col("token_address"))
         ).withColumn(
-            "whale_id", concat(lit("placeholder_"), col("token_address"))
+            "whale_tier",
+            when(col("holdings_amount") >= 1000000, "MEGA")
+            .when(col("holdings_amount") >= 100000, "LARGE")
+            .when(col("holdings_amount") >= 10000, "MEDIUM")
+            .when(col("holdings_amount") >= 1000, "SMALL")
+            .otherwise("MINIMAL")
         ).withColumn(
-            "wallet_address", lit("placeholder_wallet")
+            "rank_tier",
+            when(col("rank") <= 3, "TOP_3")
+            .when(col("rank") <= 10, "TOP_10")
+            .when(col("rank") <= 50, "TOP_50")
+            .otherwise("OTHER")
         ).withColumn(
-            "rank", lit(1)
-        ).withColumn(
-            "holdings_amount", lit(0.0)
-        ).withColumn(
-            "holdings_value_usd", lit(0.0)
-        ).withColumn(
-            "holdings_percentage", lit(0.0)
-        ).withColumn(
-            "whale_tier", lit("PLACEHOLDER")
-        ).withColumn(
-            "rank_tier", lit("PLACEHOLDER")
-        ).withColumn(
-            "txns_fetched", lit(False)
-        ).withColumn(
-            "txns_last_fetched_at", lit(None).cast("timestamp")
-        ).withColumn(
-            "txns_fetch_status", lit("pending")
-        ).withColumn(
-            "processing_status", lit("pending")
+            "processing_status",
+            when(col("txns_fetched") == True, "completed")
+            .when(col("txns_fetch_status") == "pending", "pending")
+            .otherwise("ready")
         ).withColumn(
             "is_newly_tracked", lit(True)
         ).withColumn(
-            "rank_date", lit("2025-06-24").cast("date")
-        ).withColumn(
             "silver_created_at", current_timestamp()
-        )
-        
-        # Use the placeholder whales data we created above
-        # This will be updated later when bronze whale data is fetched
+        ).withColumn(
+            "rn", row_number().over(window_spec)
+        ).filter(col("rn") == 1).drop("rn")
         
         # Write to silver tracked whales Delta table
         silver_whales_path = "s3a://smart-trader/silver/tracked_whales_delta"
         version = delta_manager.create_table(
-            placeholder_whales_df,
+            silver_df,
             silver_whales_path,
             partition_cols=None,  # No partitioning for silver layer
             merge_schema=True
         )
         
-        record_count = placeholder_whales_df.count()
-        logger.info(f"✅ Silver tracked whales: {record_count} placeholder records created in Delta v{version} (will be updated by bronze whale fetch)")
+        record_count = silver_df.count()
+        logger.info(f"✅ Silver tracked whales: {record_count} records created in Delta v{version}")
         
         return {
             "status": "success",
@@ -368,25 +366,29 @@ dag = DAG(
     tags=['delta-lake', 'true-implementation', 'acid'] + DAG_TAGS,
 )
 
-# Task Dependencies - Complete Medallion Architecture
+# Task Dependencies - Correct Medallion Architecture
 with dag:
-    # Bronze layer
+    # Bronze layer - initial token fetch
     bronze_tokens = fetch_bronze_tokens()
     
-    # Silver layer transformations
+    # Silver layer - filter tokens by liquidity
     silver_tracked_tokens = create_silver_tracked_tokens()
+    
+    # Bronze layer - fetch whale data for filtered tokens
+    bronze_whales = fetch_bronze_whales()
+    
+    # Silver layer - process whale data
     silver_tracked_whales = create_silver_tracked_whales()
     
-    # Bronze layer continued (depends on silver)
-    bronze_whales = fetch_bronze_whales()
+    # Bronze layer - fetch transaction data for whales
     bronze_transactions = fetch_bronze_transactions()
     
-    # Silver layer analytics
+    # Silver layer - PnL analytics
     silver_pnl = calculate_silver_pnl()
     
-    # Gold layer
+    # Gold layer - smart trader identification
     gold_traders = generate_gold_traders()
     helius_update = update_helius_webhooks()
     
-    # Dependencies: Proper medallion flow
-    bronze_tokens >> silver_tracked_tokens >> silver_tracked_whales >> bronze_whales >> bronze_transactions >> silver_pnl >> gold_traders >> helius_update
+    # Dependencies: Correct flow
+    bronze_tokens >> silver_tracked_tokens >> bronze_whales >> silver_tracked_whales >> bronze_transactions >> silver_pnl >> gold_traders >> helius_update
