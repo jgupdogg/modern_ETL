@@ -6,6 +6,7 @@
 # Data directories
 data/
 logs/
+archive/
 *.log
 
 # Python
