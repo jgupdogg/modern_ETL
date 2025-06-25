@@ -102,7 +102,7 @@ def create_bronze_tokens_delta(**context) -> Dict[str, Any]:
         table_config = get_table_config("bronze_tokens")
         
         version = delta_manager.create_table(
-            df_with_metadata, table_path, partition_cols=table_config["partition_cols"]
+            df_with_metadata, table_path, partition_cols=table_config["partition_cols"], merge_schema=False
         )
         
         health_check = delta_manager.validate_table_health(table_path)
@@ -259,18 +259,18 @@ def create_bronze_whales_delta(**context) -> Dict[str, Any]:
                     .otherwise(col("whale_fetch_status"))
                 ).withColumn(
                     "whale_fetched_at", 
-                    when(col("token_address").isin(processed_token_addresses), current_timestamp().cast("string"))
+                    when(col("token_address").isin(processed_token_addresses), current_timestamp())
                     .otherwise(col("whale_fetched_at"))
                 ).withColumn(
                     "_delta_timestamp", current_timestamp()
                 ).withColumn(
                     "_delta_operation", 
                     when(col("token_address").isin(processed_token_addresses), lit("WHALE_STATUS_UPDATE"))
-                    .otherwise(col("_delta_operation"))
+                    .otherwise(lit("SILVER_TOKEN_UPDATE"))
                 )
                 
-                # Write updated silver tokens table back
-                updated_silver_df.write.format("delta").mode("overwrite").save(silver_tokens_path)
+                # Write updated silver tokens table back with schema evolution
+                updated_silver_df.write.format("delta").mode("overwrite").option("mergeSchema", "true").save(silver_tokens_path)
                 logger.info(f"Updated whale_fetch_status to 'completed' for {len(processed_token_addresses)} tokens")
         
         logger.info(f"Bronze whales: {len(all_whale_data)} records → Delta v{version} ({operation})")
@@ -468,11 +468,11 @@ def create_bronze_transactions_delta(**context) -> Dict[str, Any]:
                 ).withColumn(
                     "_delta_operation",
                     when(col("whale_id").isin(processed_whale_ids), lit("TRANSACTION_STATUS_UPDATE"))
-                    .otherwise(col("_delta_operation"))
+                    .otherwise(lit("SILVER_WHALE_UPDATE"))
                 )
                 
-                # Write updated silver whales table back
-                updated_silver_whales_df.write.format("delta").mode("overwrite").save(silver_whales_path)
+                # Write updated silver whales table back with schema evolution
+                updated_silver_whales_df.write.format("delta").mode("overwrite").option("mergeSchema", "true").save(silver_whales_path)
                 logger.info(f"Updated processing_status to 'processed' for {len(processed_whale_ids)} whales")
         
         logger.info(f"Bronze transactions: {len(all_transaction_data)} records from {whales_count} wallets → Delta v{version} ({operation})")
@@ -645,12 +645,12 @@ def create_silver_wallet_pnl_delta(**context) -> Dict[str, Any]:
                                     .withColumn("calculation_month", expr("month(calculation_date)"))
         
         if delta_manager.table_exists(table_path):
-            merge_condition = "target.wallet_address = source.wallet_address AND target.token_address = source.token_address AND target.calculation_date = source.calculation_date"
-            source_columns = [c for c in partitioned_df.columns if not c.startswith("_delta")]
-            update_set = {c: f"source.{c}" for c in source_columns}
-            insert_values = {c: f"source.{c}" for c in source_columns}
-            version = delta_manager.merge_data(partitioned_df, table_path, merge_condition, update_set, insert_values)
-            operation = "MERGE"
+            # Schema evolution needed - use create_table with merge_schema=True to add new columns
+            # The create_table method handles schema evolution when table exists
+            version = delta_manager.create_table(partitioned_df, table_path, 
+                                               partition_cols=table_config["partition_cols"], 
+                                               merge_schema=True)
+            operation = "SCHEMA_EVOLUTION"
         else:
             version = delta_manager.create_table(partitioned_df, table_path, partition_cols=table_config["partition_cols"])
             operation = "CREATE"
@@ -681,11 +681,11 @@ def create_silver_wallet_pnl_delta(**context) -> Dict[str, Any]:
                 ).withColumn(
                     "_delta_operation",
                     when(col("wallet_address").isin(wallet_list), lit("PNL_STATUS_UPDATE"))
-                    .otherwise(col("_delta_operation"))
+                    .otherwise(lit("SILVER_WHALE_PNL_UPDATE"))
                 )
                 
-                # Write updated silver whales table back
-                updated_silver_whales_df.write.format("delta").mode("overwrite").save(silver_whales_path)
+                # Write updated silver whales table back with schema evolution
+                updated_silver_whales_df.write.format("delta").mode("overwrite").option("mergeSchema", "true").save(silver_whales_path)
                 logger.info(f"Updated pnl_processing_status to 'completed' for {len(wallet_list)} wallets")
         
         logger.info(f"Silver PnL: {len(wallet_list)} wallets → Delta v{version} ({operation})")

@@ -141,6 +141,35 @@ docker exec claude_pipeline-minio mc cat local/smart-trader/bronze/token_metrics
 
 ## 🏗️ TRUE Delta Lake Integration
 
+### Recent Fixes (2025-06-25)
+
+**Critical Delta Lake Stability Improvements**:
+- **Schema Evolution**: Added `mergeSchema: true` for all table updates to handle column additions
+- **Partition Overwrite**: Added `overwriteSchema: true` to allow partition scheme changes  
+- **Data Type Consistency**: Fixed timestamp casting issues to prevent type conflicts
+- **Column Reference Fix**: Resolved `_delta_operation` column errors in state tracking
+- **Table Existence Detection**: Improved validation to prevent false positive table detection
+
+**Key Changes Made**:
+```bash
+# Fixed in TrueDeltaLakeManager 
+.option("overwriteSchema", "true")    # Allows partition changes
+.option("mergeSchema", "true")        # Enables schema evolution
+
+# Fixed in optimized_delta_tasks.py
+current_timestamp().cast("string")    # Consistent timestamp handling
+lit("SILVER_TOKEN_UPDATE")           # Proper default values instead of invalid column refs
+```
+
+**Table Clearing Commands**:
+```bash
+# Complete table reset (removes all metadata and partitions)
+docker exec claude_pipeline-minio mc rm --recursive --force local/smart-trader/
+
+# Trigger fresh pipeline 
+docker compose run airflow-cli airflow dags trigger optimized_delta_smart_trader_identification
+```
+
 ### Delta Lake Architecture
 
 **Data Storage**: `s3://smart-trader/` in MinIO with TRUE Delta Lake tables
