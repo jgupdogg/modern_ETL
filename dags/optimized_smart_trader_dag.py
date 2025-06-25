@@ -557,7 +557,7 @@ def create_gold_smart_traders(**context):
                     ELSE 'UNQUALIFIED'
                 END as performance_tier,
                 -- Processing metadata
-                CURRENT_TIMESTAMP as gold_processed_at
+                CAST(CURRENT_TIMESTAMP AS STRING) as gold_processed_at
             FROM silver_wallet_pnl
             WHERE 
                 -- Focus on portfolio-level records only

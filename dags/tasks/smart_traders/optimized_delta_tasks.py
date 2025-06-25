@@ -709,7 +709,7 @@ def create_silver_wallet_pnl_delta(**context) -> Dict[str, Any]:
                                        .withColumn("processed_at", current_timestamp()) \
                                        .withColumn("data_source", lit("delta_lake_conservative")) \
                                        .withColumn("moved_to_gold", lit(False)) \
-                                       .withColumn("gold_processed_at", lit(None).cast("timestamp")) \
+                                       .withColumn("gold_processed_at", lit(None).cast("string")) \
                                        .withColumn("gold_processing_status", lit("pending"))
         
         # Round numeric values
