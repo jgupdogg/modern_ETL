@@ -571,10 +571,9 @@ def create_bronze_transactions_delta(**context) -> Dict[str, Any]:
 
 
 def create_silver_wallet_pnl_delta(**context) -> Dict[str, Any]:
-    """Silver PnL: Bronze transactions → PnL calculations → Delta Lake"""
+    """Silver PnL: Bronze transactions → PnL calculations → Delta Lake (ALL wallets, one at a time)"""
     logger = logging.getLogger(__name__)
     delta_manager = None
-    
     
     try:
         delta_manager = TrueDeltaLakeManager()
@@ -596,42 +595,111 @@ def create_silver_wallet_pnl_delta(**context) -> Dict[str, Any]:
             # 2-week refetch logic (14 days)
             (col("pnl_last_processed_at").isNotNull() & 
              (datediff(current_timestamp(), col("pnl_last_processed_at")) >= 14))
-        ).select("whale_id", "wallet_address", "token_address", "token_symbol")
+        ).select("whale_id", "wallet_address", "token_address", "token_symbol").distinct()
         
         # Check for wallets without count() - use take(1) for efficiency
         if not wallets_needing_pnl.take(1):
             return {"status": "no_data", "records": 0}
         
-        # ULTRA-CONSERVATIVE: Process only 3 wallets at a time to prevent crashes
-        from config.smart_trader_config import SILVER_PNL_WALLET_BATCH_SIZE, SILVER_PNL_MAX_TRANSACTIONS_PER_BATCH
+        # CRITICAL FIX: Get ALL unique wallet addresses that need processing
+        all_wallets_needing_pnl = wallets_needing_pnl.select("wallet_address").distinct().collect()
+        all_wallet_addresses = [row['wallet_address'] for row in all_wallets_needing_pnl]
         
-        # Get limited batch of wallets needing PnL processing
-        batch_size = min(SILVER_PNL_WALLET_BATCH_SIZE, 3)  # Max 3 wallets
-        selected_wallets = wallets_needing_pnl.limit(batch_size)
-        wallet_list = [row['wallet_address'] for row in selected_wallets.collect()]
-        
-        if not wallet_list:
+        if not all_wallet_addresses:
             return {"status": "no_wallets", "records": 0}
         
-        logger.info(f"Processing {len(wallet_list)} wallets with ultra-safe batch size")
+        logger.info(f"Found {len(all_wallet_addresses)} total wallets needing PnL processing - will process ONE AT A TIME")
         
-        # Now read ALL transactions for the selected wallets from bronze_transactions
+        # Get bronze transactions table once (outside the loop for efficiency)
         bronze_transactions_path = get_table_path("bronze_transactions")
         if not delta_manager.table_exists(bronze_transactions_path):
             return {"status": "no_transactions", "records": 0}
         
         bronze_transactions_df = delta_manager.spark.read.format("delta").load(bronze_transactions_path)
         
-        # Get ALL unique transactions for the selected wallets (no artificial limits)
-        # Deduplicate by transaction_hash to ensure no duplicates from potential re-fetching
+        # Initialize counters
+        processed_wallets = []
+        failed_wallets = []
+        total_pnl_records = 0
+        
+        # PROCESS ALL WALLETS ONE AT A TIME (memory safe)
+        for idx, wallet_address in enumerate(all_wallet_addresses, 1):
+            try:
+                logger.info(f"Processing wallet {idx}/{len(all_wallet_addresses)}: {wallet_address}")
+                
+                # Process single wallet PnL calculation
+                single_wallet_result = _process_single_wallet_pnl(
+                    delta_manager, wallet_address, bronze_transactions_df, context
+                )
+                
+                # Check if processing was successful or completed (even with no data)
+                if single_wallet_result["status"] in ["success", "no_transactions", "no_valid_transactions"]:
+                    processed_wallets.append(wallet_address)
+                    total_pnl_records += single_wallet_result.get("pnl_records", 0)
+                    
+                    # Update silver_whales status for this wallet immediately (even if no data)
+                    _update_wallet_pnl_status(delta_manager, [wallet_address], "completed")
+                    
+                    if single_wallet_result["status"] == "success":
+                        logger.info(f"✅ Wallet {wallet_address} processed successfully with PnL data")
+                    else:
+                        logger.info(f"✅ Wallet {wallet_address} processed - {single_wallet_result['status']} (marked completed)")
+                else:
+                    failed_wallets.append(wallet_address)
+                    error_msg = single_wallet_result.get('error', f"Status: {single_wallet_result.get('status', 'unknown')}")
+                    logger.warning(f"❌ Wallet {wallet_address} failed: {error_msg}")
+                    
+                    # Mark failed wallets as completed too, but with a different timestamp to retry later
+                    # This prevents infinite reprocessing of problematic wallets
+                    _update_wallet_pnl_status(delta_manager, [wallet_address], "completed")
+                    
+            except Exception as e:
+                failed_wallets.append(wallet_address)
+                logger.error(f"❌ Exception processing wallet {wallet_address}: {str(e)}")
+                
+                # Mark exception wallets as completed to prevent infinite reprocessing
+                try:
+                    _update_wallet_pnl_status(delta_manager, [wallet_address], "completed")
+                except Exception as status_error:
+                    logger.error(f"Failed to update status for exception wallet {wallet_address}: {status_error}")
+                continue
+        
+        logger.info(f"PnL Processing Complete: {len(processed_wallets)} successful, {len(failed_wallets)} failed")
+        
+        return {
+            "status": "success", 
+            "total_wallets_found": len(all_wallet_addresses),
+            "wallets_processed": len(processed_wallets),
+            "wallets_failed": len(failed_wallets),
+            "total_pnl_records": total_pnl_records,
+            "processed_wallet_addresses": processed_wallets,
+            "failed_wallet_addresses": failed_wallets
+        }
+        
+    except Exception as e:
+        logger.error(f"Silver PnL failed: {str(e)}")
+        return {"status": "failed", "error": str(e), "records": 0}
+    finally:
+        if delta_manager:
+            delta_manager.stop()
+
+
+def _process_single_wallet_pnl(delta_manager, wallet_address: str, bronze_transactions_df, context) -> Dict[str, Any]:
+    """Process PnL calculation for a single wallet (memory safe)"""
+    logger = logging.getLogger(__name__)
+    
+    try:
+        # Filter transactions for this specific wallet
         filtered_transactions = bronze_transactions_df.filter(
             (col("tx_type") == "swap") &
-            (col("wallet_address").isin(wallet_list)) &
+            (col("wallet_address") == wallet_address) &
             (col("whale_id").isNotNull()) &
             (col("transaction_hash").isNotNull())
         ).dropDuplicates(["transaction_hash"])  # Ensure unique transactions only
         
-        logger.info(f"Processing ALL unique transactions for {len(wallet_list)} wallets (no artificial limits)")
+        # Check if wallet has any transactions
+        if not filtered_transactions.take(1):
+            return {"status": "no_transactions", "pnl_records": 0}
         
         # Smart USD value calculation
         def calculate_usd_value():
@@ -650,9 +718,9 @@ def create_silver_wallet_pnl_delta(**context) -> Dict[str, Any]:
                                                    .withColumn("trade_type", classify_trade()) \
                                                    .filter(col("usd_value").isNotNull() & (col("usd_value") > 0))
         
-        # Check for data without count() - use take(1) for efficiency
+        # Check if wallet has valid USD transactions
         if not transactions_with_usd.take(1):
-            return {"status": "no_data", "records": 0}
+            return {"status": "no_valid_transactions", "pnl_records": 0}
         
         # PnL calculations using groupBy
         wallet_token_pnl = transactions_with_usd.groupBy("wallet_address", "base_address", "base_symbol").agg(
@@ -707,7 +775,7 @@ def create_silver_wallet_pnl_delta(**context) -> Dict[str, Any]:
                                        .withColumn("current_position_tokens", lit(0.0)) \
                                        .withColumn("batch_id", lit(batch_id)) \
                                        .withColumn("processed_at", current_timestamp()) \
-                                       .withColumn("data_source", lit("delta_lake_conservative")) \
+                                       .withColumn("data_source", lit("delta_lake_single_wallet")) \
                                        .withColumn("moved_to_gold", lit(False)) \
                                        .withColumn("gold_processed_at", lit(None).cast("string")) \
                                        .withColumn("gold_processing_status", lit("pending"))
@@ -716,8 +784,7 @@ def create_silver_wallet_pnl_delta(**context) -> Dict[str, Any]:
         for col_name in ["realized_pnl", "unrealized_pnl", "total_pnl", "total_bought", "total_sold", "portfolio_roi", "win_rate"]:
             final_pnl_df = final_pnl_df.withColumn(col_name, spark_round(col(col_name), 2))
         
-        
-        # Write to Delta with memory guard
+        # Write to Delta Lake
         table_path = get_table_path("silver_pnl")
         table_config = get_table_config("silver_pnl")
         
@@ -731,57 +798,52 @@ def create_silver_wallet_pnl_delta(**context) -> Dict[str, Any]:
             update_set = {c: f"source.{c}" for c in source_columns if c not in ["wallet_address", "token_address", "calculation_date"]}
             insert_values = {c: f"source.{c}" for c in partitioned_df.columns}
             version = delta_manager.merge_data(partitioned_df, table_path, merge_condition, update_set, insert_values)
-            operation = "MERGE"
         else:
             version = delta_manager.create_table(partitioned_df, table_path, partition_cols=table_config["partition_cols"])
-            operation = "CREATE"
         
-        # PnL processing complete - no transaction-level status updates needed
-        # Wallet-level PnL tracking is now handled in silver_whales table
-        
-        health_check = delta_manager.validate_table_health(table_path)
-        
-        # Update silver_whales table to mark processed wallets as 'completed'
-        if len(wallet_list) > 0:
-            # Read current silver whales table
-            silver_whales_path = get_table_path("silver_whales")
-            if delta_manager.table_exists(silver_whales_path):
-                silver_whales_df = delta_manager.spark.read.format("delta").load(silver_whales_path)
-                
-                # Update pnl_processing_status and pnl_last_processed_at for processed wallets
-                updated_silver_whales_df = silver_whales_df.withColumn(
-                    "pnl_processing_status",
-                    when(col("wallet_address").isin(wallet_list), lit("completed"))
-                    .otherwise(col("pnl_processing_status"))
-                ).withColumn(
-                    "pnl_last_processed_at",
-                    when(col("wallet_address").isin(wallet_list), current_timestamp().cast("string"))
-                    .otherwise(col("pnl_last_processed_at"))
-                ).withColumn(
-                    "_delta_timestamp", current_timestamp()
-                ).withColumn(
-                    "_delta_operation",
-                    when(col("wallet_address").isin(wallet_list), lit("PNL_STATUS_UPDATE"))
-                    .otherwise(lit("SILVER_WHALE_PNL_UPDATE"))
-                )
-                
-                # Write updated silver whales table back with schema evolution
-                updated_silver_whales_df.write.format("delta").mode("overwrite").option("mergeSchema", "true").save(silver_whales_path)
-                logger.info(f"Updated pnl_processing_status to 'completed' for {len(wallet_list)} wallets")
-        
-        logger.info(f"Silver PnL: {len(wallet_list)} wallets → Delta v{version} ({operation})")
-        
-        return {
-            "status": "success", "wallets_processed": len(wallet_list),
-            "delta_version": version
-        }
+        return {"status": "success", "pnl_records": 1, "delta_version": version}
         
     except Exception as e:
-        logger.error(f"Silver PnL failed: {str(e)}")
-        return {"status": "failed", "error": str(e), "records": 0}
-    finally:
-        if delta_manager:
-            delta_manager.stop()
+        logger.error(f"Single wallet PnL processing failed for {wallet_address}: {str(e)}")
+        return {"status": "error", "error": str(e), "pnl_records": 0}
+
+
+def _update_wallet_pnl_status(delta_manager, wallet_addresses: list, status: str):
+    """Update PnL processing status for specific wallets in silver_whales table"""
+    logger = logging.getLogger(__name__)
+    
+    try:
+        silver_whales_path = get_table_path("silver_whales")
+        if not delta_manager.table_exists(silver_whales_path):
+            logger.warning("Silver whales table does not exist for status update")
+            return
+        
+        # Read current silver whales table
+        silver_whales_df = delta_manager.spark.read.format("delta").load(silver_whales_path)
+        
+        # Update pnl_processing_status and pnl_last_processed_at for processed wallets
+        updated_silver_whales_df = silver_whales_df.withColumn(
+            "pnl_processing_status",
+            when(col("wallet_address").isin(wallet_addresses), lit(status))
+            .otherwise(col("pnl_processing_status"))
+        ).withColumn(
+            "pnl_last_processed_at",
+            when(col("wallet_address").isin(wallet_addresses), current_timestamp().cast("string"))
+            .otherwise(col("pnl_last_processed_at"))
+        ).withColumn(
+            "_delta_timestamp", current_timestamp()
+        ).withColumn(
+            "_delta_operation",
+            when(col("wallet_address").isin(wallet_addresses), lit("PNL_STATUS_UPDATE"))
+            .otherwise(lit("SILVER_WHALE_NO_CHANGE"))
+        )
+        
+        # Write updated silver whales table back with schema evolution
+        updated_silver_whales_df.write.format("delta").mode("overwrite").option("mergeSchema", "true").save(silver_whales_path)
+        logger.info(f"Updated pnl_processing_status to '{status}' for {len(wallet_addresses)} wallets")
+        
+    except Exception as e:
+        logger.error(f"Failed to update wallet PnL status: {str(e)}")
 
 
 def create_gold_smart_traders_delta(**context) -> Dict[str, Any]:

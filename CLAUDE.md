@@ -149,6 +149,11 @@ docker exec claude_pipeline-minio mc cat local/smart-trader/bronze/token_metrics
 - **Data Type Consistency**: Fixed timestamp casting issues to prevent type conflicts
 - **Column Reference Fix**: Resolved `_delta_operation` column errors in state tracking
 - **Table Existence Detection**: Improved validation to prevent false positive table detection
+- **BirdEye API Schema Update**: Updated field normalization to handle API's transition from camelCase to snake_case
+- **Wallet PnL Processing Fix**: Now processes ALL wallets needing PnL calculations (one at a time for memory safety)
+  - Properly handles wallets with no transactions or no valid USD transactions  
+  - Prevents infinite reprocessing of failed/empty wallets
+  - Marks all processed wallets as completed regardless of outcome
 
 **Key Changes Made**:
 ```bash
@@ -363,6 +368,15 @@ merge_condition = "target.transaction_hash = source.transaction_hash"
 ```python
 # MERGE operation updates PnL calculations and inserts new ones
 merge_condition = "target.wallet_address = source.wallet_address AND target.token_address = source.token_address AND target.calculation_date = source.calculation_date"
+```
+
+**Silver PnL**: Processes ALL wallets needing PnL calculations, one at a time
+```python
+# Process ALL unique wallets that need PnL processing
+all_wallets_needing_pnl = wallets_needing_pnl.select("wallet_address").distinct().collect()
+# Process each wallet individually for memory safety
+for wallet_address in all_wallet_addresses:
+    single_wallet_result = _process_single_wallet_pnl(...)
 ```
 
 **Silver PnL**: Processes ALL unique transactions per wallet (no artificial limits)

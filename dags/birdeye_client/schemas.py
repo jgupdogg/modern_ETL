@@ -114,30 +114,17 @@ def normalize_token_data(raw_data: Dict[str, Any]) -> Dict[str, Any]:
     normalized = {}
     
     # Map API response fields to schema fields
+    # Updated to match actual BirdEye API response format
     field_mapping = {
         'address': 'token_address',
-        'logoURI': 'logo_uri',
-        'mc': 'market_cap',
-        'v1hUSD': 'volume_1h_usd',
-        'v2hUSD': 'volume_2h_usd',
-        'v4hUSD': 'volume_4h_usd',
-        'v8hUSD': 'volume_8h_usd',
-        'v24hUSD': 'volume_24h_usd',
-        'v1hChangePercent': 'volume_1h_change_percent',
-        'v2hChangePercent': 'volume_2h_change_percent',
-        'v4hChangePercent': 'volume_4h_change_percent',
-        'v8hChangePercent': 'volume_8h_change_percent',
-        'v24hChangePercent': 'volume_24h_change_percent',
-        'priceChange1hPercent': 'price_change_1h_percent',
-        'priceChange2hPercent': 'price_change_2h_percent',
-        'priceChange4hPercent': 'price_change_4h_percent',
-        'priceChange8hPercent': 'price_change_8h_percent',
-        'priceChange24hPercent': 'price_change_24h_percent',
-        'trade1h': 'trade_1h_count',
-        'trade2h': 'trade_2h_count',
-        'trade4h': 'trade_4h_count',
-        'trade8h': 'trade_8h_count',
-        'trade24h': 'trade_24h_count',
+        'logo_uri': 'logo_uri',  # API uses snake_case now
+        'logoURI': 'logo_uri',   # Fallback for camelCase
+        'market_cap': 'market_cap',  # Direct match
+        'mc': 'market_cap',      # Fallback for old format
+        # Handle actual API field names (snake_case)
+        'last_trade_unix_time': 'last_trade_unix_time',
+        'recent_listing_time': 'recent_listing_time',
+        # Legacy field mappings (camelCase) for backward compatibility
         'lastTradeUnixTime': 'last_trade_unix_time',
         'recentListingTime': 'recent_listing_time',
     }
@@ -147,10 +134,20 @@ def normalize_token_data(raw_data: Dict[str, Any]) -> Dict[str, Any]:
         if api_field in raw_data:
             normalized[schema_field] = raw_data[api_field]
     
-    # Direct field copies (same name in API and schema)
+    # Direct field copies (API already uses correct field names)
     direct_fields = [
         'symbol', 'name', 'decimals', 'liquidity', 'price', 'fdv',
-        'holder', 'extensions'
+        'holder', 'extensions',
+        # Volume fields (API uses snake_case already)
+        'volume_1h_usd', 'volume_2h_usd', 'volume_4h_usd', 'volume_8h_usd', 'volume_24h_usd',
+        # Volume change fields
+        'volume_1h_change_percent', 'volume_2h_change_percent', 'volume_4h_change_percent',
+        'volume_8h_change_percent', 'volume_24h_change_percent',
+        # Price change fields  
+        'price_change_1h_percent', 'price_change_2h_percent', 'price_change_4h_percent',
+        'price_change_8h_percent', 'price_change_24h_percent',
+        # Trade count fields
+        'trade_1h_count', 'trade_2h_count', 'trade_4h_count', 'trade_8h_count', 'trade_24h_count'
     ]
     
     for field in direct_fields:
