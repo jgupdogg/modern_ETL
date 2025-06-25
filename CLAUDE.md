@@ -160,7 +160,8 @@ docker exec claude_pipeline-minio mc cat local/smart-trader/bronze/token_metrics
 current_timestamp().cast("string")    # Consistent timestamp handling
 lit("SILVER_TOKEN_UPDATE")           # Proper default values instead of invalid column refs
 
-# Transaction Deduplication (CRITICAL)
+# MERGE Operations (CRITICAL)
+MERGE on token_address               # Updates existing tokens, inserts new ones
 MERGE on transaction_hash            # Prevents duplicate transactions in bronze
 dropDuplicates(["transaction_hash"]) # Ensures unique transactions in silver PnL
 ```
@@ -331,7 +332,13 @@ processed=true   status=completed status=completed status=completed =processed  
 
 ## Transaction Processing & Deduplication
 
-### CRITICAL: Unique Transaction Handling
+### CRITICAL: MERGE Operations for Data Integrity
+
+**Bronze Tokens**: Uses MERGE (UPSERT) based on `token_address` to update existing tokens
+```python
+# MERGE operation updates tokens and inserts new ones
+merge_condition = "target.token_address = source.token_address"
+```
 
 **Bronze Transactions**: Uses MERGE (UPSERT) based on `transaction_hash` to prevent duplicates
 ```python
@@ -346,10 +353,12 @@ filtered_transactions = bronze_transactions_df.filter(...).dropDuplicates(["tran
 ```
 
 **Key Benefits**:
+- ✅ **Efficient Token Updates**: MERGE updates existing tokens instead of full table overwrites
 - ✅ **No Duplicate Transactions**: MERGE prevents re-inserting same transactions
 - ✅ **Complete Transaction History**: Silver PnL uses ALL unique transactions 
 - ✅ **Accurate PnL Calculations**: Based on complete, deduplicated transaction history
 - ✅ **Safe Re-processing**: Can re-run pipeline without data corruption
+- ✅ **Preserved Delta History**: No unnecessary version increments from overwrites
 
 ## Pipeline Execution
 

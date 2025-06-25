@@ -125,11 +125,14 @@ class TrueDeltaLakeManager:
             
             if table_exists and merge_schema:
                 # Table exists - use append with mergeSchema to evolve schema
-                self.logger.info("📝 Table exists - using schema evolution")
+                self.logger.info("📝 Table exists - using schema evolution (append mode)")
                 writer = df_with_metadata.write.format("delta").mode("append").option("mergeSchema", "true")
             else:
-                # New table or overwrite requested
-                self.logger.info("🆕 Using overwrite mode for new table")
+                # New table or overwrite requested (including merge_schema=False)
+                if table_exists:
+                    self.logger.info("🔄 Table exists - using overwrite mode (snapshot refresh)")
+                else:
+                    self.logger.info("🆕 Creating new table with overwrite mode")
                 writer = df_with_metadata.write.format("delta").mode("overwrite").option("overwriteSchema", "true")
             
             if partition_cols:
