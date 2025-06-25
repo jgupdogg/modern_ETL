@@ -173,6 +173,11 @@ dropDuplicates(["transaction_hash"]) # Silver PnL: Ensures unique transactions
 # Complete table reset (removes all metadata and partitions)
 docker exec claude_pipeline-minio mc rm --recursive --force local/smart-trader/
 
+# Clear specific layer for schema evolution
+docker exec claude_pipeline-minio mc rm --recursive --force local/smart-trader/gold/     # Gold layer only
+docker exec claude_pipeline-minio mc rm --recursive --force local/smart-trader/silver/  # Silver layer only  
+docker exec claude_pipeline-minio mc rm --recursive --force local/smart-trader/bronze/  # Bronze layer only
+
 # Trigger fresh pipeline 
 docker compose run airflow-cli airflow dags trigger optimized_delta_smart_trader_identification
 ```

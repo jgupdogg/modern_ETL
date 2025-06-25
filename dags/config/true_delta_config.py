@@ -58,7 +58,8 @@ DELTA_TABLES = {
     "bronze_whales": f"s3a://{MINIO_BUCKET}/bronze/whale_holders",
     "bronze_transactions": f"s3a://{MINIO_BUCKET}/bronze/transaction_history", 
     "silver_pnl": f"s3a://{MINIO_BUCKET}/silver/wallet_pnl",
-    "silver_tokens": f"s3a://{MINIO_BUCKET}/silver/tracked_tokens",
+    "silver_tokens": f"s3a://{MINIO_BUCKET}/silver/tracked_tokens_delta",
+    "silver_whales": f"s3a://{MINIO_BUCKET}/silver/tracked_whales_delta",
     "gold_traders": f"s3a://{MINIO_BUCKET}/gold/smart_traders_delta"
 }
 
@@ -78,6 +79,16 @@ DELTA_TABLE_CONFIGS = {
         "partition_cols": ["transaction_date"],
         "z_order_cols": ["wallet_address", "timestamp"],
         "description": "Wallet transaction history with consistency"
+    },
+    "silver_tokens": {
+        "partition_cols": None,
+        "z_order_cols": ["liquidity", "token_address"],
+        "description": "Liquidity-filtered tokens with silver layer enhancements"
+    },
+    "silver_whales": {
+        "partition_cols": None,
+        "z_order_cols": ["holdings_value_usd", "whale_id"],
+        "description": "Processed whale holders with status tracking"
     },
     "silver_pnl": {
         "partition_cols": ["calculation_year", "calculation_month"],
