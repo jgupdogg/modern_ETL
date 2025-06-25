@@ -321,12 +321,12 @@ def create_silver_tracked_whales(**context):
                 
                 -- Transaction tracking status (new for silver layer)
                 false as txns_fetched,
-                CAST(NULL as TIMESTAMP) as txns_last_fetched_at,
+                CAST(NULL as STRING) as txns_last_fetched_at,
                 'pending' as txns_fetch_status,
                 
                 -- PnL processing tracking (new for silver layer)
                 false as pnl_processed,
-                CAST(NULL as TIMESTAMP) as pnl_last_processed_at,
+                CAST(NULL as STRING) as pnl_last_processed_at,
                 'pending' as pnl_processing_status,
                 
                 -- Silver layer metadata
@@ -609,7 +609,7 @@ def create_gold_smart_traders(**context):
                 .otherwise(col("moved_to_gold"))
             ).withColumn(
                 "gold_processed_at",
-                when(col("wallet_address").isin(processed_wallet_addresses), current_timestamp())
+                when(col("wallet_address").isin(processed_wallet_addresses), current_timestamp().cast("string"))
                 .otherwise(col("gold_processed_at"))
             ).withColumn(
                 "gold_processing_status",

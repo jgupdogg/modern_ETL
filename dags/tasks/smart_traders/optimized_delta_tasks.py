@@ -259,7 +259,7 @@ def create_bronze_whales_delta(**context) -> Dict[str, Any]:
                     .otherwise(col("whale_fetch_status"))
                 ).withColumn(
                     "whale_fetched_at", 
-                    when(col("token_address").isin(processed_token_addresses), current_timestamp())
+                    when(col("token_address").isin(processed_token_addresses), current_timestamp().cast("string"))
                     .otherwise(col("whale_fetched_at"))
                 ).withColumn(
                     "_delta_timestamp", current_timestamp()
@@ -461,7 +461,7 @@ def create_bronze_transactions_delta(**context) -> Dict[str, Any]:
                     .otherwise(col("processing_status"))
                 ).withColumn(
                     "txns_last_fetched_at",
-                    when(col("whale_id").isin(processed_whale_ids), current_timestamp())
+                    when(col("whale_id").isin(processed_whale_ids), current_timestamp().cast("string"))
                     .otherwise(col("txns_last_fetched_at"))
                 ).withColumn(
                     "_delta_timestamp", current_timestamp()
@@ -674,7 +674,7 @@ def create_silver_wallet_pnl_delta(**context) -> Dict[str, Any]:
                     .otherwise(col("pnl_processing_status"))
                 ).withColumn(
                     "pnl_last_processed_at",
-                    when(col("wallet_address").isin(wallet_list), current_timestamp())
+                    when(col("wallet_address").isin(wallet_list), current_timestamp().cast("string"))
                     .otherwise(col("pnl_last_processed_at"))
                 ).withColumn(
                     "_delta_timestamp", current_timestamp()
