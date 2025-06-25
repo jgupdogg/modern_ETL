@@ -89,8 +89,44 @@ def create_bronze_tokens_delta(**context) -> Dict[str, Any]:
         if not tokens_result:
             return {"status": "no_data", "records": 0}
         
-        # Convert to Spark DataFrame and write to Delta
-        df = delta_manager.spark.createDataFrame(tokens_result)
+        # Explicit schema based on BirdEye API token response (normalized field names)
+        token_schema = StructType([
+            StructField("token_address", StringType(), False),
+            StructField("logo_uri", StringType(), True),
+            StructField("name", StringType(), True),
+            StructField("symbol", StringType(), True),
+            StructField("decimals", IntegerType(), True),
+            StructField("market_cap", DoubleType(), True),
+            StructField("fdv", DoubleType(), True),
+            StructField("liquidity", DoubleType(), True),
+            StructField("last_trade_unix_time", IntegerType(), True),
+            StructField("volume_1h_usd", DoubleType(), True),
+            StructField("volume_1h_change_percent", DoubleType(), True),
+            StructField("volume_2h_usd", DoubleType(), True),
+            StructField("volume_2h_change_percent", DoubleType(), True),
+            StructField("volume_4h_usd", DoubleType(), True),
+            StructField("volume_4h_change_percent", DoubleType(), True),
+            StructField("volume_8h_usd", DoubleType(), True),
+            StructField("volume_8h_change_percent", DoubleType(), True),
+            StructField("volume_24h_usd", DoubleType(), True),
+            StructField("volume_24h_change_percent", DoubleType(), True),
+            StructField("trade_1h_count", IntegerType(), True),
+            StructField("trade_2h_count", IntegerType(), True),
+            StructField("trade_4h_count", IntegerType(), True),
+            StructField("trade_8h_count", IntegerType(), True),
+            StructField("trade_24h_count", IntegerType(), True),
+            StructField("price", DoubleType(), True),
+            StructField("price_change_1h_percent", DoubleType(), True),
+            StructField("price_change_2h_percent", DoubleType(), True),
+            StructField("price_change_4h_percent", DoubleType(), True),
+            StructField("price_change_8h_percent", DoubleType(), True),
+            StructField("price_change_24h_percent", DoubleType(), True),
+            StructField("holder", IntegerType(), True),
+            StructField("recent_listing_time", IntegerType(), True)
+        ])
+        
+        # Convert to Spark DataFrame with explicit schema
+        df = delta_manager.spark.createDataFrame(tokens_result, token_schema)
         df_with_metadata = df.withColumn("_delta_timestamp", current_timestamp()) \
                             .withColumn("_delta_operation", lit("BRONZE_TOKEN_CREATE")) \
                             .withColumn("processing_date", current_date()) \
