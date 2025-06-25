@@ -434,8 +434,13 @@ def create_bronze_transactions_delta(**context) -> Dict[str, Any]:
         table_config = get_table_config("bronze_transactions")
         
         if delta_manager.table_exists(table_path):
-            version = delta_manager.append_data(df_with_metadata, table_path)
-            operation = "APPEND"
+            # Use MERGE to prevent duplicate transactions based on transaction_hash
+            merge_condition = "target.transaction_hash = source.transaction_hash"
+            source_columns = [c for c in df_with_metadata.columns if not c.startswith("_delta")]
+            update_set = {c: f"source.{c}" for c in source_columns if c != "transaction_hash"}
+            insert_values = {c: f"source.{c}" for c in df_with_metadata.columns}
+            version = delta_manager.merge_data(df_with_metadata, table_path, merge_condition, update_set, insert_values)
+            operation = "MERGE"
         else:
             version = delta_manager.create_table(
                 df_with_metadata, table_path, partition_cols=table_config["partition_cols"]
@@ -541,17 +546,17 @@ def create_silver_wallet_pnl_delta(**context) -> Dict[str, Any]:
             return {"status": "no_transactions", "records": 0}
         
         bronze_transactions_df = delta_manager.spark.read.format("delta").load(bronze_transactions_path)
+        
+        # Get ALL unique transactions for the selected wallets (no artificial limits)
+        # Deduplicate by transaction_hash to ensure no duplicates from potential re-fetching
         filtered_transactions = bronze_transactions_df.filter(
             (col("tx_type") == "swap") &
             (col("wallet_address").isin(wallet_list)) &
-            (col("whale_id").isNotNull())
-        )
+            (col("whale_id").isNotNull()) &
+            (col("transaction_hash").isNotNull())
+        ).dropDuplicates(["transaction_hash"])  # Ensure unique transactions only
         
-        # Further limit transactions per wallet
-        window_spec = Window.partitionBy("wallet_address").orderBy(col("timestamp").desc())
-        filtered_transactions = filtered_transactions.withColumn("row_num", row_number().over(window_spec)) \
-                                                   .filter(col("row_num") <= SILVER_PNL_MAX_TRANSACTIONS_PER_BATCH) \
-                                                   .drop("row_num")
+        logger.info(f"Processing ALL unique transactions for {len(wallet_list)} wallets (no artificial limits)")
         
         # Smart USD value calculation
         def calculate_usd_value():
