@@ -617,10 +617,6 @@ def create_gold_smart_traders(**context):
                 .otherwise(col("gold_processing_status"))
             ).withColumn(
                 "_delta_timestamp", current_timestamp()
-            ).withColumn(
-                "_delta_operation",
-                when(col("wallet_address").isin(processed_wallet_addresses), lit("GOLD_STATUS_UPDATE"))
-                .otherwise(col("_delta_operation"))
             )
             
             # Write updated silver_pnl table back
