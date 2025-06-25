@@ -53,74 +53,167 @@ def fetch_bronze_tokens(**context):
 
 @task
 def create_silver_tracked_tokens(**context):
-    """Create silver tracked tokens by filtering bronze tokens by liquidity using Delta Lake"""
+    """Create silver tracked tokens using dbt SQL logic with PySpark execution"""
     logger = logging.getLogger(__name__)
     
     try:
-        # Memory safety check
-        import psutil
-        available_memory = psutil.virtual_memory().available / (1024**3)  # GB
-        if available_memory < 2.0:
-            logger.warning(f"Low memory: {available_memory:.1f}GB available, proceeding with minimal processing")
-            # Could return early or use smaller batch sizes
-        from utils.true_delta_manager import TrueDeltaLakeManager
-        from pyspark.sql.functions import col, lit, current_timestamp, row_number, when, coalesce
-        from pyspark.sql.window import Window
+        from utils.true_delta_manager import TrueDeltaLakeManager, get_table_path
+        from config.true_delta_config import get_table_config
         
         delta_manager = TrueDeltaLakeManager()
         
         # Read bronze tokens from Delta Lake
-        bronze_tokens_path = "s3a://smart-trader/bronze/token_metrics"
+        bronze_tokens_path = get_table_path("bronze_tokens")
         if not delta_manager.table_exists(bronze_tokens_path):
             logger.warning("Bronze tokens table not found")
             return {"status": "no_source", "records": 0}
         
+        # Create temp view for SQL processing
         bronze_df = delta_manager.spark.read.format("delta").load(bronze_tokens_path)
+        bronze_df.createOrReplaceTempView("bronze_tokens")
         
-        # Apply silver layer transformations (similar to dbt model)
-        filtered_df = bronze_df.filter(
-            (col("liquidity") >= 100000) &  # Min $100K liquidity
-            col("token_address").isNotNull() &
-            col("symbol").isNotNull() &
-            col("liquidity").isNotNull() &
-            col("price").isNotNull()
+        # Execute dbt SQL logic via Spark SQL
+        silver_tokens_sql = """
+        WITH basic_filtered_tokens AS (
+            SELECT 
+                token_address,
+                symbol,
+                name,
+                decimals,
+                liquidity,
+                price,
+                fdv,
+                holder,
+                _delta_timestamp,
+                _delta_operation,
+                processing_date,
+                batch_id,
+                _delta_created_at
+            FROM bronze_tokens
+            WHERE 
+                -- Only process unprocessed tokens
+                processed = false
+                
+                -- Basic liquidity filter - only tokens with meaningful liquidity
+                AND liquidity >= 100000  -- Min $100K liquidity for silver layer
+                
+                -- Ensure we have core required fields
+                AND token_address IS NOT NULL
+                AND symbol IS NOT NULL
+                AND liquidity IS NOT NULL
+                AND price IS NOT NULL
+                
+                -- Only process the latest Delta Lake operations
+                AND _delta_operation IN ('BRONZE_TOKEN_CREATE', 'BRONZE_TOKEN_APPEND')
+        ),
+        
+        enhanced_silver_tokens AS (
+            SELECT 
+                token_address,
+                symbol,
+                name,
+                decimals,
+                liquidity,
+                price,
+                fdv,
+                holder,
+                -- Calculate liquidity tier for categorization
+                CASE 
+                    WHEN liquidity >= 1000000 THEN 'HIGH'
+                    WHEN liquidity >= 500000 THEN 'MEDIUM' 
+                    WHEN liquidity >= 100000 THEN 'LOW'
+                    ELSE 'MINIMAL'
+                END as liquidity_tier,
+                
+                -- Calculate holder density (FDV per holder)
+                CASE 
+                    WHEN holder > 0 THEN ROUND(fdv / holder, 2)
+                    ELSE NULL 
+                END as fdv_per_holder,
+                
+                -- Silver layer metadata
+                processing_date,
+                batch_id as bronze_batch_id,
+                _delta_timestamp as bronze_delta_timestamp,
+                _delta_operation as source_operation,
+                _delta_created_at as bronze_created_at,
+                CURRENT_TIMESTAMP as silver_created_at,
+                
+                -- Tracking fields for downstream processing
+                'pending' as whale_fetch_status,
+                CAST(NULL as TIMESTAMP) as whale_fetched_at,
+                true as is_newly_tracked,
+                
+                -- Row number for deduplication (keep latest by processing_date)
+                ROW_NUMBER() OVER (
+                    PARTITION BY token_address 
+                    ORDER BY processing_date DESC, _delta_timestamp DESC
+                ) as rn
+            FROM basic_filtered_tokens
         )
         
-        # Add liquidity tier and other silver layer fields
-        window_spec = Window.partitionBy("token_address").orderBy(col("processing_date").desc(), col("_delta_timestamp").desc())
+        SELECT 
+            token_address,
+            symbol,
+            name,
+            decimals,
+            liquidity,
+            price,
+            fdv,
+            holder,
+            liquidity_tier,
+            fdv_per_holder,
+            processing_date,
+            bronze_batch_id,
+            bronze_delta_timestamp,
+            source_operation,
+            bronze_created_at,
+            silver_created_at,
+            whale_fetch_status,
+            whale_fetched_at,
+            is_newly_tracked
+        FROM enhanced_silver_tokens
+        WHERE rn = 1  -- Keep only latest version of each token
+        """
         
-        silver_df = filtered_df.withColumn(
-            "liquidity_tier",
-            when(col("liquidity") >= 1000000, "HIGH")
-            .when(col("liquidity") >= 500000, "MEDIUM")
-            .when(col("liquidity") >= 100000, "LOW")
-            .otherwise("MINIMAL")
-        ).withColumn(
-            "fdv_per_holder",
-            when(col("holder") > 0, col("fdv") / col("holder")).otherwise(None)
-        ).withColumn(
-            "whale_fetch_status", lit("pending")
-        ).withColumn(
-            "whale_fetched_at", lit(None).cast("timestamp")
-        ).withColumn(
-            "is_newly_tracked", lit(True)
-        ).withColumn(
-            "silver_created_at", current_timestamp()
-        ).withColumn(
-            "rn", row_number().over(window_spec)
-        ).filter(col("rn") == 1).drop("rn")
+        # Execute SQL transformation
+        silver_df = delta_manager.spark.sql(silver_tokens_sql)
         
         # Write to silver tracked tokens Delta table
-        silver_tokens_path = "s3a://smart-trader/silver/tracked_tokens_delta"
+        silver_tokens_path = get_table_path("silver_tokens")
+        table_config = get_table_config("silver_tokens")
         version = delta_manager.create_table(
             silver_df, 
             silver_tokens_path,
-            partition_cols=None,  # No partitioning for silver layer
+            partition_cols=table_config["partition_cols"],
             merge_schema=True
         )
         
         record_count = silver_df.count()
         logger.info(f"✅ Silver tracked tokens: {record_count} records created in Delta v{version}")
+        
+        # Mark processed bronze tokens as completed
+        if record_count > 0:
+            processed_token_addresses = [row.token_address for row in silver_df.select("token_address").collect()]
+            
+            # Update bronze tokens to mark as processed
+            bronze_tokens_path = get_table_path("bronze_tokens")
+            if delta_manager.table_exists(bronze_tokens_path):
+                bronze_df = delta_manager.spark.read.format("delta").load(bronze_tokens_path)
+                
+                updated_bronze_df = bronze_df.withColumn(
+                    "processed",
+                    when(col("token_address").isin(processed_token_addresses), lit(True))
+                    .otherwise(col("processed"))
+                ).withColumn(
+                    "_delta_timestamp", current_timestamp()
+                ).withColumn(
+                    "_delta_operation", lit("BRONZE_TOKEN_UPDATE")
+                )
+                
+                # Overwrite bronze table with updated processed status
+                updated_bronze_df.write.format("delta").mode("overwrite").option("overwriteSchema", "true").save(bronze_tokens_path)
+                logger.info(f"✅ Marked {len(processed_token_addresses)} bronze tokens as processed")
         
         return {
             "status": "success", 
@@ -138,68 +231,164 @@ def create_silver_tracked_tokens(**context):
 
 @task
 def create_silver_tracked_whales(**context):
-    """Create silver tracked whales by filtering and enhancing bronze whale holders using Delta Lake"""
+    """Create silver tracked whales using dbt SQL logic with PySpark execution"""
     logger = logging.getLogger(__name__)
     
     try:
-        from utils.true_delta_manager import TrueDeltaLakeManager
-        from pyspark.sql.functions import col, lit, current_timestamp, row_number, when, concat, coalesce
-        from pyspark.sql.window import Window
+        from utils.true_delta_manager import TrueDeltaLakeManager, get_table_path
+        from config.true_delta_config import get_table_config
         
         delta_manager = TrueDeltaLakeManager()
         
-        # Read bronze whale holders from Delta Lake (now should exist after bronze_whales task)
-        bronze_whales_path = "s3a://smart-trader/bronze/whale_holders"
+        # Read bronze whale holders from Delta Lake
+        bronze_whales_path = get_table_path("bronze_whales")
         if not delta_manager.table_exists(bronze_whales_path):
             logger.warning("Bronze whale holders table not found")
             return {"status": "no_source", "records": 0}
         
+        # Create temp view for SQL processing
         bronze_df = delta_manager.spark.read.format("delta").load(bronze_whales_path)
+        bronze_df.createOrReplaceTempView("bronze_whales")
         
-        # Apply silver layer transformations (similar to dbt model)
-        filtered_df = bronze_df.filter(
-            col("wallet_address").isNotNull() &
-            col("token_address").isNotNull() &
-            (col("holdings_amount") > 0)
+        # Execute dbt SQL logic via Spark SQL
+        silver_whales_sql = """
+        WITH basic_filtered_whales AS (
+            SELECT 
+                token_address,
+                token_symbol,
+                token_name,
+                wallet_address,
+                rank,
+                amount,
+                ui_amount,
+                decimals,
+                mint,
+                token_account,
+                fetched_at,
+                batch_id,
+                data_source,
+                _delta_timestamp,
+                _delta_operation,
+                rank_date,
+                _delta_created_at
+            FROM bronze_whales
+            WHERE 
+                -- Basic validation filters
+                wallet_address IS NOT NULL
+                AND token_address IS NOT NULL
+                AND ui_amount > 0  -- Only whales with actual token holdings
+                
+                -- Only process the latest Delta Lake operations
+                AND _delta_operation IN ('BRONZE_WHALE_CREATE', 'BRONZE_WHALE_APPEND')
+        ),
+        
+        enhanced_silver_whales AS (
+            SELECT 
+                -- Create composite whale ID for unique tracking
+                CONCAT(wallet_address, '_', token_address) as whale_id,
+                
+                -- Core whale information
+                wallet_address,
+                token_address,
+                token_symbol,
+                token_name,
+                rank,
+                amount,
+                ui_amount,
+                decimals,
+                mint,
+                token_account,
+                
+                -- Calculate whale tier based on ui_amount (human readable amount)
+                CASE 
+                    WHEN ui_amount >= 1000000 THEN 'MEGA'
+                    WHEN ui_amount >= 100000 THEN 'LARGE' 
+                    WHEN ui_amount >= 10000 THEN 'MEDIUM'
+                    WHEN ui_amount >= 1000 THEN 'SMALL'
+                    ELSE 'MINIMAL'
+                END as whale_tier,
+                
+                -- Calculate rank tier for easier filtering
+                CASE 
+                    WHEN rank <= 3 THEN 'TOP_3'
+                    WHEN rank <= 10 THEN 'TOP_10'
+                    WHEN rank <= 50 THEN 'TOP_50'
+                    ELSE 'OTHER'
+                END as rank_tier,
+                
+                -- Transaction tracking status (new for silver layer)
+                false as txns_fetched,
+                CAST(NULL as TIMESTAMP) as txns_last_fetched_at,
+                'pending' as txns_fetch_status,
+                
+                -- PnL processing tracking (new for silver layer)
+                false as pnl_processed,
+                CAST(NULL as TIMESTAMP) as pnl_last_processed_at,
+                'pending' as pnl_processing_status,
+                
+                -- Silver layer metadata
+                rank_date,
+                batch_id as bronze_batch_id,
+                _delta_timestamp as bronze_delta_timestamp,
+                _delta_operation as source_operation,
+                _delta_created_at as bronze_created_at,
+                CURRENT_TIMESTAMP as silver_created_at,
+                
+                -- Tracking fields for downstream processing
+                'ready' as processing_status,
+                
+                true as is_newly_tracked,
+                
+                -- Row number for deduplication (keep latest by rank_date and bronze timestamp)
+                ROW_NUMBER() OVER (
+                    PARTITION BY wallet_address, token_address 
+                    ORDER BY rank_date DESC, _delta_timestamp DESC
+                ) as rn
+            FROM basic_filtered_whales
         )
         
-        # Add whale tiers and processing fields
-        window_spec = Window.partitionBy("wallet_address", "token_address").orderBy(col("rank_date").desc(), col("_delta_timestamp").desc())
+        SELECT 
+            whale_id,
+            wallet_address,
+            token_address,
+            token_symbol,
+            token_name,
+            rank,
+            amount,
+            ui_amount,
+            decimals,
+            mint,
+            token_account,
+            whale_tier,
+            rank_tier,
+            txns_fetched,
+            txns_last_fetched_at,
+            txns_fetch_status,
+            pnl_processed,
+            pnl_last_processed_at,
+            pnl_processing_status,
+            processing_status,
+            rank_date,
+            bronze_batch_id,
+            bronze_delta_timestamp,
+            source_operation,
+            bronze_created_at,
+            silver_created_at,
+            is_newly_tracked
+        FROM enhanced_silver_whales
+        WHERE rn = 1  -- Keep only latest version of each whale-token pair
+        """
         
-        silver_df = filtered_df.withColumn(
-            "whale_id", concat(col("wallet_address"), lit("_"), col("token_address"))
-        ).withColumn(
-            "whale_tier",
-            when(col("holdings_amount") >= 1000000, "MEGA")
-            .when(col("holdings_amount") >= 100000, "LARGE")
-            .when(col("holdings_amount") >= 10000, "MEDIUM")
-            .when(col("holdings_amount") >= 1000, "SMALL")
-            .otherwise("MINIMAL")
-        ).withColumn(
-            "rank_tier",
-            when(col("rank") <= 3, "TOP_3")
-            .when(col("rank") <= 10, "TOP_10")
-            .when(col("rank") <= 50, "TOP_50")
-            .otherwise("OTHER")
-        ).withColumn(
-            "processing_status",
-            when(col("txns_fetched") == True, "completed")
-            .when(col("txns_fetch_status") == "pending", "pending")
-            .otherwise("ready")
-        ).withColumn(
-            "is_newly_tracked", lit(True)
-        ).withColumn(
-            "silver_created_at", current_timestamp()
-        ).withColumn(
-            "rn", row_number().over(window_spec)
-        ).filter(col("rn") == 1).drop("rn")
+        # Execute SQL transformation
+        silver_df = delta_manager.spark.sql(silver_whales_sql)
         
         # Write to silver tracked whales Delta table
-        silver_whales_path = "s3a://smart-trader/silver/tracked_whales_delta"
+        silver_whales_path = get_table_path("silver_whales")
+        table_config = get_table_config("silver_whales")
         version = delta_manager.create_table(
             silver_df,
             silver_whales_path,
-            partition_cols=None,  # No partitioning for silver layer
+            partition_cols=table_config["partition_cols"],
             merge_schema=True
         )
         
@@ -301,35 +490,157 @@ def calculate_silver_pnl(**context):
             logger.error(f"❌ Silver PnL failed: {str(e)}")
         raise
 
+
 @task
-def generate_gold_traders(**context):
-    """Generate smart trader rankings using TRUE Delta Lake with performance tiers"""
+def create_gold_smart_traders(**context):
+    """Create gold smart traders using dbt SQL logic with PySpark execution"""
     logger = logging.getLogger(__name__)
     
     try:
-        from tasks.smart_traders.optimized_delta_tasks import create_gold_smart_traders_delta
-        result = create_gold_smart_traders_delta(**context)
+        from utils.true_delta_manager import TrueDeltaLakeManager, get_table_path
+        from config.true_delta_config import get_table_config
         
-        if result and isinstance(result, dict):
-            trader_count = result.get('smart_traders_count', 0)
-            tier_breakdown = result.get('performance_tiers', {})
-            
-            logger.info(f"✅ Gold traders: {trader_count} identified, tiers: {tier_breakdown} with Delta Lake")
-            return {
-                "status": "success",
-                "smart_traders_count": trader_count,
-                "performance_tiers": tier_breakdown
-            }
+        delta_manager = TrueDeltaLakeManager()
+        
+        # Check if silver PnL data exists
+        silver_pnl_path = get_table_path("silver_pnl")
+        if not delta_manager.table_exists(silver_pnl_path):
+            logger.warning("Silver PnL table not found")
+            return {"status": "no_source", "records": 0}
+        
+        # Filter for wallets not yet processed for gold layer
+        silver_df = delta_manager.spark.read.format("delta").load(silver_pnl_path)
+        unprocessed_for_gold = silver_df.filter(
+            (col("moved_to_gold") == False) |
+            col("moved_to_gold").isNull()
+        )
+        
+        # Check if there are any unprocessed wallets
+        if not unprocessed_for_gold.take(1):
+            logger.info("No new wallets to process for gold layer")
+            return {"status": "no_new_data", "smart_traders_count": 0}
+        
+        # Create temp view for SQL processing with only unprocessed wallets
+        unprocessed_for_gold.createOrReplaceTempView("silver_wallet_pnl")
+        
+        # Execute dbt SQL logic via Spark SQL (from smart_wallets.sql)
+        gold_traders_sql = """
+        WITH smart_wallets AS (
+            SELECT 
+                wallet_address,
+                trade_count,
+                trade_frequency_daily,
+                avg_holding_time_hours,
+                total_bought,
+                total_sold,
+                win_rate,
+                first_transaction,
+                last_transaction,
+                current_position_tokens,
+                current_position_cost_basis,
+                current_position_value,
+                realized_pnl,
+                unrealized_pnl,
+                total_pnl,
+                portfolio_roi as roi,
+                batch_id,
+                processed_at,
+                data_source,
+                -- Simple performance classification
+                CASE 
+                    WHEN total_pnl > 1000 AND win_rate > 50 THEN 'ELITE'
+                    WHEN total_pnl > 100 AND win_rate > 30 THEN 'STRONG'
+                    WHEN total_pnl > 0 OR win_rate > 0 THEN 'QUALIFIED'
+                    ELSE 'UNQUALIFIED'
+                END as performance_tier,
+                -- Processing metadata
+                CURRENT_TIMESTAMP as gold_processed_at
+            FROM silver_wallet_pnl
+            WHERE 
+                -- Focus on portfolio-level records only
+                token_address = 'ALL_TOKENS' 
+                
+                -- Simple criteria: positive PnL OR positive win rate
+                AND (total_pnl > 0 OR win_rate > 0)
+        )
+        
+        SELECT *
+        FROM smart_wallets
+        ORDER BY total_pnl DESC, win_rate DESC
+        """
+        
+        # Execute SQL transformation
+        gold_df = delta_manager.spark.sql(gold_traders_sql)
+        
+        # Write to gold smart traders Delta table
+        gold_traders_path = get_table_path("gold_traders")
+        table_config = get_table_config("gold_traders")
+        
+        # Append to gold table (incremental processing)
+        if delta_manager.table_exists(gold_traders_path):
+            # Table exists, append new records
+            gold_df.write.format("delta").mode("append") \
+                   .option("mergeSchema", "true") \
+                   .save(gold_traders_path)
+            operation = "APPEND"
         else:
-            logger.warning("⚠️ No smart traders identified")
-            return {"status": "no_results", "smart_traders_count": 0}
+            # Table doesn't exist, create it
+            gold_df.write.format("delta").mode("overwrite") \
+                   .partitionBy(*table_config["partition_cols"] if table_config["partition_cols"] else []) \
+                   .save(gold_traders_path)
+            operation = "CREATE"
+        
+        # Get stats
+        record_count = gold_df.count()
+        tier_counts = gold_df.groupBy("performance_tier").count().collect()
+        tier_stats = {row['performance_tier']: row['count'] for row in tier_counts}
+        
+        # Mark processed wallets in silver_pnl as moved_to_gold
+        if record_count > 0:
+            processed_wallet_addresses = [row.wallet_address for row in gold_df.select("wallet_address").collect()]
             
+            # Update silver_pnl to mark wallets as processed for gold
+            updated_silver_df = silver_df.withColumn(
+                "moved_to_gold",
+                when(col("wallet_address").isin(processed_wallet_addresses), lit(True))
+                .otherwise(col("moved_to_gold"))
+            ).withColumn(
+                "gold_processed_at",
+                when(col("wallet_address").isin(processed_wallet_addresses), current_timestamp())
+                .otherwise(col("gold_processed_at"))
+            ).withColumn(
+                "gold_processing_status",
+                when(col("wallet_address").isin(processed_wallet_addresses), lit("completed"))
+                .otherwise(col("gold_processing_status"))
+            ).withColumn(
+                "_delta_timestamp", current_timestamp()
+            ).withColumn(
+                "_delta_operation",
+                when(col("wallet_address").isin(processed_wallet_addresses), lit("GOLD_STATUS_UPDATE"))
+                .otherwise(col("_delta_operation"))
+            )
+            
+            # Write updated silver_pnl table back
+            updated_silver_df.write.format("delta").mode("overwrite").save(silver_pnl_path)
+            logger.info(f"Marked {len(processed_wallet_addresses)} wallets as moved_to_gold")
+        
+        logger.info(f"✅ Gold smart traders: {record_count} qualified traders {operation.lower()}ed")
+        logger.info(f"   Performance tiers: {tier_stats}")
+        
+        return {
+            "status": "success",
+            "smart_traders_count": record_count,
+            "performance_tiers": tier_stats,
+            "operation": operation,
+            "table_path": gold_traders_path
+        }
+        
     except Exception as e:
-        if any(keyword in str(e).lower() for keyword in DBT_ERROR_KEYWORDS):
-            logger.error("❌ Transformation failed")
-        else:
-            logger.error(f"❌ Gold traders failed: {str(e)}")
-        raise
+        logger.error(f"❌ Gold smart traders failed: {str(e)}")
+        return {"status": "failed", "error": str(e)}
+    finally:
+        if 'delta_manager' in locals():
+            delta_manager.stop()
 
 @task(trigger_rule=TriggerRule.ALL_DONE)
 def update_helius_webhooks(**context):
@@ -386,8 +697,8 @@ with dag:
     # Silver layer - PnL analytics
     silver_pnl = calculate_silver_pnl()
     
-    # Gold layer - smart trader identification
-    gold_traders = generate_gold_traders()
+    # Gold layer - dbt transformation
+    gold_traders = create_gold_smart_traders()
     helius_update = update_helius_webhooks()
     
     # Dependencies: Correct flow

@@ -95,9 +95,8 @@ def create_bronze_tokens_delta(**context) -> Dict[str, Any]:
                             .withColumn("_delta_operation", lit("BRONZE_TOKEN_CREATE")) \
                             .withColumn("processing_date", current_date()) \
                             .withColumn("batch_id", lit(context.get("run_id", datetime.now().strftime("%Y%m%d_%H%M%S")))) \
-                            .withColumn("whale_fetch_status", lit("pending")) \
-                            .withColumn("whale_fetched_at", lit(None).cast("timestamp")) \
-                            .withColumn("is_newly_tracked", lit(True))
+                            .withColumn("processed", lit(False)) \
+                            .withColumn("_delta_created_at", lit(datetime.now().isoformat()))
         
         table_path = get_table_path("bronze_tokens")
         table_config = get_table_config("bronze_tokens")
@@ -111,7 +110,7 @@ def create_bronze_tokens_delta(**context) -> Dict[str, Any]:
         logger.info(f"Bronze tokens: {len(tokens_result)} records → Delta v{version}")
         
         return {
-            "status": "success", "records": health_check["record_count"],
+            "status": "success", "records": len(tokens_result),
             "delta_version": version, "table_path": table_path
         }
         
@@ -131,19 +130,25 @@ def create_bronze_whales_delta(**context) -> Dict[str, Any]:
     try:
         delta_manager = TrueDeltaLakeManager()
         
-        # Read from silver tracked whales
-        silver_whales_path = "s3a://smart-trader/silver/tracked_whales_delta"
-        if not delta_manager.table_exists(silver_whales_path):
+        # Read from silver tracked tokens to find tokens needing whale data
+        silver_tokens_path = get_table_path("silver_tokens")
+        if not delta_manager.table_exists(silver_tokens_path):
             return {"status": "no_source", "records": 0}
         
-        silver_whales_df = delta_manager.spark.read.format("delta").load(silver_whales_path)
-        unprocessed_whales = silver_whales_df.filter(
-            (silver_whales_df.processing_status == "pending") |
-            (silver_whales_df.processing_status.isNull())
+        silver_tokens_df = delta_manager.spark.read.format("delta").load(silver_tokens_path)
+        
+        # Filter for tokens that need whale data fetched
+        tokens_needing_whales = silver_tokens_df.filter(
+            (col("whale_fetch_status") == "pending") |
+            col("whale_fetch_status").isNull() |
+            # 72-hour refetch logic
+            (col("whale_fetched_at").isNotNull() & 
+             (datediff(current_timestamp(), col("whale_fetched_at")) >= 3))
         ).select("token_address", "symbol", "name").limit(5)
         
-        token_count = unprocessed_whales.count()
-        if token_count == 0:
+        # Collect limited data to avoid JVM crashes
+        whale_tokens = tokens_needing_whales.collect()
+        if not whale_tokens:
             return {"status": "no_data", "records": 0}
         
         # Get API key and fetch whale data
@@ -163,7 +168,8 @@ def create_bronze_whales_delta(**context) -> Dict[str, Any]:
         birdeye_client = BirdEyeAPIClient(api_key)
         all_whale_data = []
         batch_id = context.get("run_id", datetime.now().strftime("%Y%m%d_%H%M%S"))
-        tokens_list = [row.asDict() for row in unprocessed_whales.collect()]
+        # Convert to dict for processing
+        tokens_list = [row.asDict() for row in whale_tokens]
         
         for token_data in tokens_list:
             token_address = token_data['token_address']
@@ -182,12 +188,12 @@ def create_bronze_whales_delta(**context) -> Dict[str, Any]:
                         "token_name": str(token_data.get('name', '')),
                         "wallet_address": str(holder.get('owner', '')),
                         "rank": int(idx + 1),
-                        "holdings_amount": float(holder.get('uiAmount', 0)),
-                        "holdings_value_usd": float(holder.get('valueUsd', 0)) if holder.get('valueUsd') else 0.0,
-                        "holdings_percentage": float(holder.get('percentage', 0)) if holder.get('percentage') else 0.0,
-                        "txns_fetched": False,
-                        "txns_last_fetched_at": None,
-                        "txns_fetch_status": "pending",
+                        # Use actual API response fields
+                        "amount": str(holder.get('amount', '0')),  # Raw amount as string
+                        "ui_amount": float(holder.get('ui_amount', 0)),  # Human readable amount
+                        "decimals": int(holder.get('decimals', 9)),
+                        "mint": str(holder.get('mint', token_address)),  # Should be same as token_address
+                        "token_account": str(holder.get('token_account', '')),
                         "fetched_at": datetime.now().isoformat(),
                         "batch_id": str(batch_id),
                         "data_source": "birdeye_v3"
@@ -200,19 +206,18 @@ def create_bronze_whales_delta(**context) -> Dict[str, Any]:
         if not all_whale_data:
             return {"status": "no_data", "records": 0}
         
-        # Explicit schema to avoid type inference issues
+        # Explicit schema to match actual API response
         whale_schema = StructType([
             StructField("token_address", StringType(), False),
             StructField("token_symbol", StringType(), True),
             StructField("token_name", StringType(), True),
             StructField("wallet_address", StringType(), False),
             StructField("rank", IntegerType(), True),
-            StructField("holdings_amount", FloatType(), True),
-            StructField("holdings_value_usd", FloatType(), True),
-            StructField("holdings_percentage", FloatType(), True),
-            StructField("txns_fetched", BooleanType(), False),
-            StructField("txns_last_fetched_at", StringType(), True),
-            StructField("txns_fetch_status", StringType(), True),
+            StructField("amount", StringType(), True),  # Raw amount as string
+            StructField("ui_amount", FloatType(), True),  # Human readable amount
+            StructField("decimals", IntegerType(), True),
+            StructField("mint", StringType(), True),  # Token mint address
+            StructField("token_account", StringType(), True),  # Holder's token account
             StructField("fetched_at", StringType(), False),
             StructField("batch_id", StringType(), False),
             StructField("data_source", StringType(), False)
@@ -239,11 +244,11 @@ def create_bronze_whales_delta(**context) -> Dict[str, Any]:
         health_check = delta_manager.validate_table_health(table_path)
         
         # Update silver tracked tokens whale_fetch_status to 'completed' for processed tokens
-        if token_count > 0 and len(all_whale_data) > 0:
+        if len(tokens_list) > 0 and len(all_whale_data) > 0:
             processed_token_addresses = [token_data['token_address'] for token_data in tokens_list]
             
             # Read current silver tokens table
-            silver_tokens_path = "s3a://smart-trader/silver/tracked_tokens_delta"
+            silver_tokens_path = get_table_path("silver_tokens")
             if delta_manager.table_exists(silver_tokens_path):
                 silver_tokens_df = delta_manager.spark.read.format("delta").load(silver_tokens_path)
                 
@@ -271,7 +276,7 @@ def create_bronze_whales_delta(**context) -> Dict[str, Any]:
         logger.info(f"Bronze whales: {len(all_whale_data)} records → Delta v{version} ({operation})")
         
         return {
-            "status": "success", "records": health_check["record_count"],
+            "status": "success", "records": len(all_whale_data),
             "delta_version": version, "operation": operation
         }
         
@@ -284,7 +289,9 @@ def create_bronze_whales_delta(**context) -> Dict[str, Any]:
 
 
 def create_bronze_transactions_delta(**context) -> Dict[str, Any]:
-    """Bronze transactions: Silver whales → BirdEye API → Delta Lake"""
+    """Bronze transactions: Silver whales → BirdEye API → Delta Lake
+    Fetches transaction data for whales that need processing or refetching (2-week cycle)
+    """
     logger = logging.getLogger(__name__)
     delta_manager = None
     
@@ -292,19 +299,30 @@ def create_bronze_transactions_delta(**context) -> Dict[str, Any]:
         delta_manager = TrueDeltaLakeManager()
         
         # Read from silver tracked whales
-        silver_whales_path = "s3a://smart-trader/silver/tracked_whales_delta"
+        silver_whales_path = get_table_path("silver_whales")
         if not delta_manager.table_exists(silver_whales_path):
             return {"status": "no_source", "records": 0}
         
         silver_whales_df = delta_manager.spark.read.format("delta").load(silver_whales_path)
-        unprocessed_whales = silver_whales_df.filter(
-            (silver_whales_df.processing_status == "pending") |
-            (silver_whales_df.processing_status == "ready")
+        
+        # Filter for whales needing transaction data fetched
+        # Include: 1) New whales (pending/ready status) 
+        #         2) Whales with no fetch timestamp
+        #         3) Whales last fetched more than 2 weeks ago (14 days)
+        whales_needing_transactions = silver_whales_df.filter(
+            (col("processing_status") == "pending") |
+            (col("processing_status") == "ready") |
+            col("txns_last_fetched_at").isNull() |
+            # 2-week refetch logic (14 days)
+            (col("txns_last_fetched_at").isNotNull() & 
+             (datediff(current_timestamp(), col("txns_last_fetched_at")) >= 14))
         ).select("whale_id", "wallet_address", "token_address", "token_symbol").limit(10)
         
-        whales_count = unprocessed_whales.count()
-        if whales_count == 0:
+        # Collect limited data without count() to avoid crashes
+        whales_list = [row.asDict() for row in whales_needing_transactions.collect()]
+        if not whales_list:
             return {"status": "no_data", "records": 0}
+        whales_count = len(whales_list)
         
         # Get API key and fetch transaction data
         from airflow.models import Variable
@@ -323,7 +341,6 @@ def create_bronze_transactions_delta(**context) -> Dict[str, Any]:
         birdeye_client = BirdEyeAPIClient(api_key)
         all_transaction_data = []
         batch_id = context.get("run_id", datetime.now().strftime("%Y%m%d_%H%M%S"))
-        whales_list = [row.asDict() for row in unprocessed_whales.collect()]
         
         for whale_data in whales_list:
             wallet_address = whale_data['wallet_address']
@@ -372,7 +389,6 @@ def create_bronze_transactions_delta(**context) -> Dict[str, Any]:
                     "quote_nearest_price": float(quote.get('nearest_price', 0)) if quote.get('nearest_price') is not None else None,
                     "source": trade.get('source'),
                     "tx_type": trade.get('tx_type'),
-                    "processed_for_pnl": False,
                     "fetched_at": datetime.now().isoformat(),
                     "batch_id": batch_id,
                     "data_source": "birdeye_v3"
@@ -403,7 +419,6 @@ def create_bronze_transactions_delta(**context) -> Dict[str, Any]:
             StructField("quote_nearest_price", FloatType(), True),
             StructField("source", StringType(), True),
             StructField("tx_type", StringType(), True),
-            StructField("processed_for_pnl", BooleanType(), False),
             StructField("fetched_at", StringType(), False),
             StructField("batch_id", StringType(), False),
             StructField("data_source", StringType(), False)
@@ -430,11 +445,12 @@ def create_bronze_transactions_delta(**context) -> Dict[str, Any]:
         health_check = delta_manager.validate_table_health(table_path)
         
         # Update silver tracked whales processing_status to 'processed' for processed whales
+        # This handles both new whales and whales being refetched after 2 weeks
         if whales_count > 0 and len(all_transaction_data) > 0:
             processed_whale_ids = [whale_data['whale_id'] for whale_data in whales_list]
             
             # Read current silver tracked whales table
-            silver_whales_path = "s3a://smart-trader/silver/tracked_whales_delta"
+            silver_whales_path = get_table_path("silver_whales")
             if delta_manager.table_exists(silver_whales_path):
                 silver_whales_df = delta_manager.spark.read.format("delta").load(silver_whales_path)
                 
@@ -444,9 +460,9 @@ def create_bronze_transactions_delta(**context) -> Dict[str, Any]:
                     when(col("whale_id").isin(processed_whale_ids), lit("processed"))
                     .otherwise(col("processing_status"))
                 ).withColumn(
-                    "transactions_fetched_at",
+                    "txns_last_fetched_at",
                     when(col("whale_id").isin(processed_whale_ids), current_timestamp())
-                    .otherwise(col("transactions_fetched_at"))
+                    .otherwise(col("txns_last_fetched_at"))
                 ).withColumn(
                     "_delta_timestamp", current_timestamp()
                 ).withColumn(
@@ -462,7 +478,7 @@ def create_bronze_transactions_delta(**context) -> Dict[str, Any]:
         logger.info(f"Bronze transactions: {len(all_transaction_data)} records from {whales_count} wallets → Delta v{version} ({operation})")
         
         return {
-            "status": "success", "records": health_check["record_count"],
+            "status": "success", "records": len(all_transaction_data),
             "delta_version": version, "wallets_processed": whales_count
         }
         
@@ -479,29 +495,63 @@ def create_silver_wallet_pnl_delta(**context) -> Dict[str, Any]:
     logger = logging.getLogger(__name__)
     delta_manager = None
     
+    
     try:
         delta_manager = TrueDeltaLakeManager()
         
-        # Read unprocessed transactions
-        bronze_transactions_path = "s3a://smart-trader/bronze/transaction_history"
-        if not delta_manager.table_exists(bronze_transactions_path):
+        # Read from silver whales to find wallets needing PnL processing
+        silver_whales_path = get_table_path("silver_whales")
+        if not delta_manager.table_exists(silver_whales_path):
             return {"status": "no_source", "records": 0}
         
-        bronze_df = delta_manager.spark.read.format("delta").load(bronze_transactions_path)
-        unprocessed_transactions = bronze_df.filter(
-            (col("processed_for_pnl") == False) &
-            (col("tx_type") == "swap") &
-            (col("whale_id").isNotNull()) &
-            (col("wallet_address").isNotNull())
-        )
+        silver_whales_df = delta_manager.spark.read.format("delta").load(silver_whales_path)
         
-        if unprocessed_transactions.count() == 0:
+        # Filter for wallets needing PnL processing
+        # Include: 1) New wallets (pending PnL status)
+        #         2) Wallets with no PnL timestamp  
+        #         3) Wallets last processed more than 2 weeks ago (14 days)
+        wallets_needing_pnl = silver_whales_df.filter(
+            (col("pnl_processing_status") == "pending") |
+            col("pnl_last_processed_at").isNull() |
+            # 2-week refetch logic (14 days)
+            (col("pnl_last_processed_at").isNotNull() & 
+             (datediff(current_timestamp(), col("pnl_last_processed_at")) >= 14))
+        ).select("whale_id", "wallet_address", "token_address", "token_symbol")
+        
+        # Check for wallets without count() - use take(1) for efficiency
+        if not wallets_needing_pnl.take(1):
             return {"status": "no_data", "records": 0}
         
-        # CONSERVATIVE: limit to 10 wallets
-        unique_wallets = unprocessed_transactions.select("wallet_address").distinct().limit(10)
-        wallet_list = [row['wallet_address'] for row in unique_wallets.collect()]
-        filtered_transactions = unprocessed_transactions.filter(col("wallet_address").isin(wallet_list))
+        # ULTRA-CONSERVATIVE: Process only 3 wallets at a time to prevent crashes
+        from config.smart_trader_config import SILVER_PNL_WALLET_BATCH_SIZE, SILVER_PNL_MAX_TRANSACTIONS_PER_BATCH
+        
+        # Get limited batch of wallets needing PnL processing
+        batch_size = min(SILVER_PNL_WALLET_BATCH_SIZE, 3)  # Max 3 wallets
+        selected_wallets = wallets_needing_pnl.limit(batch_size)
+        wallet_list = [row['wallet_address'] for row in selected_wallets.collect()]
+        
+        if not wallet_list:
+            return {"status": "no_wallets", "records": 0}
+        
+        logger.info(f"Processing {len(wallet_list)} wallets with ultra-safe batch size")
+        
+        # Now read ALL transactions for the selected wallets from bronze_transactions
+        bronze_transactions_path = get_table_path("bronze_transactions")
+        if not delta_manager.table_exists(bronze_transactions_path):
+            return {"status": "no_transactions", "records": 0}
+        
+        bronze_transactions_df = delta_manager.spark.read.format("delta").load(bronze_transactions_path)
+        filtered_transactions = bronze_transactions_df.filter(
+            (col("tx_type") == "swap") &
+            (col("wallet_address").isin(wallet_list)) &
+            (col("whale_id").isNotNull())
+        )
+        
+        # Further limit transactions per wallet
+        window_spec = Window.partitionBy("wallet_address").orderBy(col("timestamp").desc())
+        filtered_transactions = filtered_transactions.withColumn("row_num", row_number().over(window_spec)) \
+                                                   .filter(col("row_num") <= SILVER_PNL_MAX_TRANSACTIONS_PER_BATCH) \
+                                                   .drop("row_num")
         
         # Smart USD value calculation
         def calculate_usd_value():
@@ -520,7 +570,8 @@ def create_silver_wallet_pnl_delta(**context) -> Dict[str, Any]:
                                                    .withColumn("trade_type", classify_trade()) \
                                                    .filter(col("usd_value").isNotNull() & (col("usd_value") > 0))
         
-        if transactions_with_usd.count() == 0:
+        # Check for data without count() - use take(1) for efficiency
+        if not transactions_with_usd.take(1):
             return {"status": "no_data", "records": 0}
         
         # PnL calculations using groupBy
@@ -576,13 +627,17 @@ def create_silver_wallet_pnl_delta(**context) -> Dict[str, Any]:
                                        .withColumn("current_position_tokens", lit(0.0)) \
                                        .withColumn("batch_id", lit(batch_id)) \
                                        .withColumn("processed_at", current_timestamp()) \
-                                       .withColumn("data_source", lit("delta_lake_conservative"))
+                                       .withColumn("data_source", lit("delta_lake_conservative")) \
+                                       .withColumn("moved_to_gold", lit(False)) \
+                                       .withColumn("gold_processed_at", lit(None).cast("timestamp")) \
+                                       .withColumn("gold_processing_status", lit("pending"))
         
         # Round numeric values
         for col_name in ["realized_pnl", "unrealized_pnl", "total_pnl", "total_bought", "total_sold", "portfolio_roi", "win_rate"]:
             final_pnl_df = final_pnl_df.withColumn(col_name, spark_round(col(col_name), 2))
         
-        # Write to Delta
+        
+        # Write to Delta with memory guard
         table_path = get_table_path("silver_pnl")
         table_config = get_table_config("silver_pnl")
         
@@ -600,21 +655,44 @@ def create_silver_wallet_pnl_delta(**context) -> Dict[str, Any]:
             version = delta_manager.create_table(partitioned_df, table_path, partition_cols=table_config["partition_cols"])
             operation = "CREATE"
         
-        # Mark transactions as processed
-        processed_hashes = [row['transaction_hash'] for row in transactions_with_usd.select("transaction_hash").distinct().collect()]
-        bronze_update = delta_manager.spark.read.format("delta").load(bronze_transactions_path)
-        updated_bronze = bronze_update.withColumn("processed_for_pnl", when(col("transaction_hash").isin(processed_hashes), True).otherwise(col("processed_for_pnl"))) \
-                                     .withColumn("_delta_operation", when(col("transaction_hash").isin(processed_hashes), "PNL_PROCESSED").otherwise(col("_delta_operation"))) \
-                                     .withColumn("_delta_timestamp", current_timestamp())
-        updated_bronze.write.format("delta").mode("overwrite").save(bronze_transactions_path)
+        # PnL processing complete - no transaction-level status updates needed
+        # Wallet-level PnL tracking is now handled in silver_whales table
         
         health_check = delta_manager.validate_table_health(table_path)
         
-        logger.info(f"Silver PnL: {len(wallet_list)} wallets, {len(processed_hashes)} txns → {health_check['record_count']} PnL records, Delta v{version} ({operation})")
+        # Update silver_whales table to mark processed wallets as 'completed'
+        if len(wallet_list) > 0:
+            # Read current silver whales table
+            silver_whales_path = get_table_path("silver_whales")
+            if delta_manager.table_exists(silver_whales_path):
+                silver_whales_df = delta_manager.spark.read.format("delta").load(silver_whales_path)
+                
+                # Update pnl_processing_status and pnl_last_processed_at for processed wallets
+                updated_silver_whales_df = silver_whales_df.withColumn(
+                    "pnl_processing_status",
+                    when(col("wallet_address").isin(wallet_list), lit("completed"))
+                    .otherwise(col("pnl_processing_status"))
+                ).withColumn(
+                    "pnl_last_processed_at",
+                    when(col("wallet_address").isin(wallet_list), current_timestamp())
+                    .otherwise(col("pnl_last_processed_at"))
+                ).withColumn(
+                    "_delta_timestamp", current_timestamp()
+                ).withColumn(
+                    "_delta_operation",
+                    when(col("wallet_address").isin(wallet_list), lit("PNL_STATUS_UPDATE"))
+                    .otherwise(col("_delta_operation"))
+                )
+                
+                # Write updated silver whales table back
+                updated_silver_whales_df.write.format("delta").mode("overwrite").save(silver_whales_path)
+                logger.info(f"Updated pnl_processing_status to 'completed' for {len(wallet_list)} wallets")
+        
+        logger.info(f"Silver PnL: {len(wallet_list)} wallets → Delta v{version} ({operation})")
         
         return {
             "status": "success", "wallets_processed": len(wallet_list),
-            "pnl_records": health_check["record_count"], "delta_version": version
+            "delta_version": version
         }
         
     except Exception as e:
@@ -634,7 +712,7 @@ def create_gold_smart_traders_delta(**context) -> Dict[str, Any]:
         delta_manager = TrueDeltaLakeManager()
         
         # Read from silver PnL
-        silver_pnl_path = "s3a://smart-trader/silver/wallet_pnl"
+        silver_pnl_path = get_table_path("silver_pnl")
         if not delta_manager.table_exists(silver_pnl_path):
             return {"status": "no_source", "records": 0}
         
@@ -647,7 +725,8 @@ def create_gold_smart_traders_delta(**context) -> Dict[str, Any]:
             (silver_df.wallet_address.isNotNull())
         )
         
-        if qualified_traders.count() == 0:
+        # Check for data without count() - use take(1) for efficiency
+        if not qualified_traders.take(1):
             return {"status": "no_data", "records": 0}
         
         # Enhanced transformations
