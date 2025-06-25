@@ -24,7 +24,7 @@ GOLD_MAX_TRADERS_PER_BATCH = 1000     # Max top traders per batch
 # =============================================================================
 
 # Token List Filtering Criteria
-TOKEN_LIMIT = 100                    # Total tokens to fetch
+TOKEN_LIMIT = 25                     # Total tokens to fetch (reduced for memory safety)
 MIN_LIQUIDITY = 200000               # Minimum token liquidity
 MAX_LIQUIDITY = 1000000              # Maximum token liquidity  
 MIN_VOLUME_1H_USD = 200000           # Minimum 1-hour volume

@@ -89,78 +89,99 @@ def create_bronze_tokens_delta(**context) -> Dict[str, Any]:
         if not tokens_result:
             return {"status": "no_data", "records": 0}
         
-        # Explicit schema based on BirdEye API token response (normalized field names)
-        token_schema = StructType([
-            StructField("token_address", StringType(), False),
-            StructField("logo_uri", StringType(), True),
-            StructField("name", StringType(), True),
-            StructField("symbol", StringType(), True),
-            StructField("decimals", IntegerType(), True),
-            StructField("market_cap", DoubleType(), True),
-            StructField("fdv", DoubleType(), True),
-            StructField("liquidity", DoubleType(), True),
-            StructField("last_trade_unix_time", IntegerType(), True),
-            StructField("volume_1h_usd", DoubleType(), True),
-            StructField("volume_1h_change_percent", DoubleType(), True),
-            StructField("volume_2h_usd", DoubleType(), True),
-            StructField("volume_2h_change_percent", DoubleType(), True),
-            StructField("volume_4h_usd", DoubleType(), True),
-            StructField("volume_4h_change_percent", DoubleType(), True),
-            StructField("volume_8h_usd", DoubleType(), True),
-            StructField("volume_8h_change_percent", DoubleType(), True),
-            StructField("volume_24h_usd", DoubleType(), True),
-            StructField("volume_24h_change_percent", DoubleType(), True),
-            StructField("trade_1h_count", IntegerType(), True),
-            StructField("trade_2h_count", IntegerType(), True),
-            StructField("trade_4h_count", IntegerType(), True),
-            StructField("trade_8h_count", IntegerType(), True),
-            StructField("trade_24h_count", IntegerType(), True),
-            StructField("price", DoubleType(), True),
-            StructField("price_change_1h_percent", DoubleType(), True),
-            StructField("price_change_2h_percent", DoubleType(), True),
-            StructField("price_change_4h_percent", DoubleType(), True),
-            StructField("price_change_8h_percent", DoubleType(), True),
-            StructField("price_change_24h_percent", DoubleType(), True),
-            StructField("holder", IntegerType(), True),
-            StructField("recent_listing_time", IntegerType(), True)
-        ])
+        # Process tokens in small batches to prevent memory issues
+        BATCH_SIZE = 10  # Ultra-conservative batch size
+        total_processed = 0
         
-        # Convert to Spark DataFrame with explicit schema
-        df = delta_manager.spark.createDataFrame(tokens_result, token_schema)
-        df_with_metadata = df.withColumn("_delta_timestamp", current_timestamp()) \
-                            .withColumn("_delta_operation", lit("BRONZE_TOKEN_CREATE")) \
-                            .withColumn("processing_date", current_date()) \
-                            .withColumn("batch_id", lit(context.get("run_id", datetime.now().strftime("%Y%m%d_%H%M%S")))) \
-                            .withColumn("processed", lit(False)) \
-                            .withColumn("_delta_created_at", lit(datetime.now().isoformat()))
-        
-        table_path = get_table_path("bronze_tokens")
-        table_config = get_table_config("bronze_tokens")
-        
-        # TEMPORARY: Use overwrite to handle schema evolution from old schema to new explicit schema
-        # After this run establishes the correct schema, we can switch back to MERGE operations
-        # TODO: Switch back to MERGE after schema is stabilized
-        if delta_manager.table_exists(table_path):
-            # Use overwrite mode to handle schema evolution for now
-            version = delta_manager.create_table(
-                df_with_metadata, table_path, 
-                partition_cols=table_config["partition_cols"], 
-                merge_schema=False  # Use overwrite to handle schema change
-            )
-            operation = "OVERWRITE_SCHEMA_EVOLUTION"
-        else:
-            version = delta_manager.create_table(
-                df_with_metadata, table_path, partition_cols=table_config["partition_cols"]
-            )
-            operation = "CREATE"
+        for i in range(0, len(tokens_result), BATCH_SIZE):
+            batch_tokens = tokens_result[i:i + BATCH_SIZE]
+            logger.info(f"Processing token batch {i//BATCH_SIZE + 1}: {len(batch_tokens)} tokens")
+            
+            # Process batch
+            if not batch_tokens:
+                continue
+            
+            # Explicit schema based on BirdEye API token response (normalized field names)
+            token_schema = StructType([
+                StructField("token_address", StringType(), False),
+                StructField("logo_uri", StringType(), True),
+                StructField("name", StringType(), True),
+                StructField("symbol", StringType(), True),
+                StructField("decimals", IntegerType(), True),
+                StructField("market_cap", DoubleType(), True),
+                StructField("fdv", DoubleType(), True),
+                StructField("liquidity", DoubleType(), True),
+                StructField("last_trade_unix_time", IntegerType(), True),
+                StructField("volume_1h_usd", DoubleType(), True),
+                StructField("volume_1h_change_percent", DoubleType(), True),
+                StructField("volume_2h_usd", DoubleType(), True),
+                StructField("volume_2h_change_percent", DoubleType(), True),
+                StructField("volume_4h_usd", DoubleType(), True),
+                StructField("volume_4h_change_percent", DoubleType(), True),
+                StructField("volume_8h_usd", DoubleType(), True),
+                StructField("volume_8h_change_percent", DoubleType(), True),
+                StructField("volume_24h_usd", DoubleType(), True),
+                StructField("volume_24h_change_percent", DoubleType(), True),
+                StructField("trade_1h_count", IntegerType(), True),
+                StructField("trade_2h_count", IntegerType(), True),
+                StructField("trade_4h_count", IntegerType(), True),
+                StructField("trade_8h_count", IntegerType(), True),
+                StructField("trade_24h_count", IntegerType(), True),
+                StructField("price", DoubleType(), True),
+                StructField("price_change_1h_percent", DoubleType(), True),
+                StructField("price_change_2h_percent", DoubleType(), True),
+                StructField("price_change_4h_percent", DoubleType(), True),
+                StructField("price_change_8h_percent", DoubleType(), True),
+                StructField("price_change_24h_percent", DoubleType(), True),
+                StructField("holder", IntegerType(), True),
+                StructField("recent_listing_time", IntegerType(), True)
+            ])
+            
+            # Convert to Spark DataFrame with explicit schema
+            df = delta_manager.spark.createDataFrame(batch_tokens, token_schema)
+            df_with_metadata = df.withColumn("_delta_timestamp", current_timestamp()) \
+                                .withColumn("_delta_operation", lit("BRONZE_TOKEN_CREATE")) \
+                                .withColumn("processing_date", current_date()) \
+                                .withColumn("batch_id", lit(context.get("run_id", datetime.now().strftime("%Y%m%d_%H%M%S")))) \
+                                .withColumn("processed", lit(False)) \
+                                .withColumn("_delta_created_at", lit(datetime.now().isoformat()))
+            
+            table_path = get_table_path("bronze_tokens")
+            table_config = get_table_config("bronze_tokens")
+            
+            # For first batch, handle schema evolution; for subsequent batches, use append
+            if i == 0:  # First batch
+                # TEMPORARY: Use overwrite to handle schema evolution from old schema to new explicit schema
+                if delta_manager.table_exists(table_path):
+                    version = delta_manager.create_table(
+                        df_with_metadata, table_path, 
+                        partition_cols=table_config["partition_cols"], 
+                        merge_schema=False  # Use overwrite to handle schema change
+                    )
+                    operation = "OVERWRITE_SCHEMA_EVOLUTION"
+                else:
+                    version = delta_manager.create_table(
+                        df_with_metadata, table_path, partition_cols=table_config["partition_cols"]
+                    )
+                    operation = "CREATE"
+            else:  # Subsequent batches
+                version = delta_manager.append_data(df_with_metadata, table_path, merge_schema=True)
+                operation = "APPEND_BATCH"
+            
+            total_processed += len(batch_tokens)
+            logger.info(f"Batch {i//BATCH_SIZE + 1}: {len(batch_tokens)} tokens → Delta v{version} ({operation})")
+            
+            # Small delay between batches to prevent resource exhaustion
+            import time
+            time.sleep(0.5)
         
         health_check = delta_manager.validate_table_health(table_path)
         
-        logger.info(f"Bronze tokens: {len(tokens_result)} records → Delta v{version} ({operation})")
+        logger.info(f"Bronze tokens complete: {total_processed} total records processed in {len(range(0, len(tokens_result), BATCH_SIZE))} batches")
         
         return {
-            "status": "success", "records": len(tokens_result),
-            "delta_version": version, "table_path": table_path
+            "status": "success", "records": total_processed,
+            "delta_version": version, "table_path": table_path, "batches": len(range(0, len(tokens_result), BATCH_SIZE))
         }
         
     except Exception as e:
