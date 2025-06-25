@@ -242,9 +242,14 @@ def create_bronze_whales_delta(**context) -> Dict[str, Any]:
         table_path = get_table_path("bronze_whales")
         table_config = get_table_config("bronze_whales")
         
+        # Use MERGE to update existing whale holdings and insert new ones
         if delta_manager.table_exists(table_path):
-            version = delta_manager.append_data(df_with_metadata, table_path)
-            operation = "APPEND"
+            merge_condition = "target.wallet_address = source.wallet_address AND target.token_address = source.token_address"
+            source_columns = [c for c in df_with_metadata.columns if not c.startswith("_delta")]
+            update_set = {c: f"source.{c}" for c in source_columns if c not in ["wallet_address", "token_address"]}
+            insert_values = {c: f"source.{c}" for c in df_with_metadata.columns}
+            version = delta_manager.merge_data(df_with_metadata, table_path, merge_condition, update_set, insert_values)
+            operation = "MERGE"
         else:
             version = delta_manager.create_table(
                 df_with_metadata, table_path, partition_cols=table_config["partition_cols"]
@@ -659,13 +664,14 @@ def create_silver_wallet_pnl_delta(**context) -> Dict[str, Any]:
         partitioned_df = final_pnl_df.withColumn("calculation_year", expr("year(calculation_date)")) \
                                     .withColumn("calculation_month", expr("month(calculation_date)"))
         
+        # Use MERGE to update existing PnL calculations and insert new ones
         if delta_manager.table_exists(table_path):
-            # Schema evolution needed - use create_table with merge_schema=True to add new columns
-            # The create_table method handles schema evolution when table exists
-            version = delta_manager.create_table(partitioned_df, table_path, 
-                                               partition_cols=table_config["partition_cols"], 
-                                               merge_schema=True)
-            operation = "SCHEMA_EVOLUTION"
+            merge_condition = "target.wallet_address = source.wallet_address AND target.token_address = source.token_address AND target.calculation_date = source.calculation_date"
+            source_columns = [c for c in partitioned_df.columns if not c.startswith("_delta")]
+            update_set = {c: f"source.{c}" for c in source_columns if c not in ["wallet_address", "token_address", "calculation_date"]}
+            insert_values = {c: f"source.{c}" for c in partitioned_df.columns}
+            version = delta_manager.merge_data(partitioned_df, table_path, merge_condition, update_set, insert_values)
+            operation = "MERGE"
         else:
             version = delta_manager.create_table(partitioned_df, table_path, partition_cols=table_config["partition_cols"])
             operation = "CREATE"

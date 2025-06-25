@@ -160,10 +160,12 @@ docker exec claude_pipeline-minio mc cat local/smart-trader/bronze/token_metrics
 current_timestamp().cast("string")    # Consistent timestamp handling
 lit("SILVER_TOKEN_UPDATE")           # Proper default values instead of invalid column refs
 
-# MERGE Operations (CRITICAL)
-MERGE on token_address               # Updates existing tokens, inserts new ones
-MERGE on transaction_hash            # Prevents duplicate transactions in bronze
-dropDuplicates(["transaction_hash"]) # Ensures unique transactions in silver PnL
+# MERGE Operations (CRITICAL) - All Tasks Use MERGE
+MERGE on token_address               # Bronze tokens: Updates existing, inserts new
+MERGE on wallet+token_address        # Bronze whales: Updates holdings, inserts new  
+MERGE on transaction_hash            # Bronze transactions: Prevents duplicates
+MERGE on wallet+token+date           # Silver PnL: Updates calculations, inserts new
+dropDuplicates(["transaction_hash"]) # Silver PnL: Ensures unique transactions
 ```
 
 **Table Clearing Commands**:
@@ -340,10 +342,22 @@ processed=true   status=completed status=completed status=completed =processed  
 merge_condition = "target.token_address = source.token_address"
 ```
 
+**Bronze Whales**: Uses MERGE (UPSERT) based on `wallet_address + token_address` composite key
+```python
+# MERGE operation updates whale holdings and inserts new ones
+merge_condition = "target.wallet_address = source.wallet_address AND target.token_address = source.token_address"
+```
+
 **Bronze Transactions**: Uses MERGE (UPSERT) based on `transaction_hash` to prevent duplicates
 ```python
 # MERGE operation prevents duplicate transactions 
 merge_condition = "target.transaction_hash = source.transaction_hash"
+```
+
+**Silver PnL**: Uses MERGE (UPSERT) based on `wallet_address + token_address + calculation_date`
+```python
+# MERGE operation updates PnL calculations and inserts new ones
+merge_condition = "target.wallet_address = source.wallet_address AND target.token_address = source.token_address AND target.calculation_date = source.calculation_date"
 ```
 
 **Silver PnL**: Processes ALL unique transactions per wallet (no artificial limits)
@@ -353,12 +367,13 @@ filtered_transactions = bronze_transactions_df.filter(...).dropDuplicates(["tran
 ```
 
 **Key Benefits**:
-- ✅ **Efficient Token Updates**: MERGE updates existing tokens instead of full table overwrites
-- ✅ **No Duplicate Transactions**: MERGE prevents re-inserting same transactions
+- ✅ **Efficient Updates**: ALL tasks use MERGE instead of overwrites or appends
+- ✅ **No Duplicates**: Proper unique keys prevent duplicate data across all layers
 - ✅ **Complete Transaction History**: Silver PnL uses ALL unique transactions 
-- ✅ **Accurate PnL Calculations**: Based on complete, deduplicated transaction history
+- ✅ **Accurate Financial Data**: PnL calculations update existing records efficiently
 - ✅ **Safe Re-processing**: Can re-run pipeline without data corruption
 - ✅ **Preserved Delta History**: No unnecessary version increments from overwrites
+- ✅ **Proper ACID Semantics**: All operations maintain data integrity
 
 ## Pipeline Execution
 
