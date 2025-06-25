@@ -137,14 +137,17 @@ def create_bronze_tokens_delta(**context) -> Dict[str, Any]:
         table_path = get_table_path("bronze_tokens")
         table_config = get_table_config("bronze_tokens")
         
-        # Use MERGE to update existing tokens and insert new ones based on token_address
+        # TEMPORARY: Use overwrite to handle schema evolution from old schema to new explicit schema
+        # After this run establishes the correct schema, we can switch back to MERGE operations
+        # TODO: Switch back to MERGE after schema is stabilized
         if delta_manager.table_exists(table_path):
-            merge_condition = "target.token_address = source.token_address"
-            source_columns = [c for c in df_with_metadata.columns if not c.startswith("_delta")]
-            update_set = {c: f"source.{c}" for c in source_columns if c != "token_address"}
-            insert_values = {c: f"source.{c}" for c in df_with_metadata.columns}
-            version = delta_manager.merge_data(df_with_metadata, table_path, merge_condition, update_set, insert_values)
-            operation = "MERGE"
+            # Use overwrite mode to handle schema evolution for now
+            version = delta_manager.create_table(
+                df_with_metadata, table_path, 
+                partition_cols=table_config["partition_cols"], 
+                merge_schema=False  # Use overwrite to handle schema change
+            )
+            operation = "OVERWRITE_SCHEMA_EVOLUTION"
         else:
             version = delta_manager.create_table(
                 df_with_metadata, table_path, partition_cols=table_config["partition_cols"]
