@@ -19,7 +19,7 @@ from pyspark.sql.functions import (
     datediff, expr, to_date, row_number, least, current_date
 )
 from pyspark.sql.window import Window
-from pyspark.sql.types import StructType, StructField, StringType, DoubleType, IntegerType, TimestampType, BooleanType, FloatType
+from pyspark.sql.types import StructType, StructField, StringType, DoubleType, IntegerType, LongType, TimestampType, BooleanType, FloatType
 
 
 def create_bronze_tokens_delta(**context) -> Dict[str, Any]:
@@ -107,11 +107,11 @@ def create_bronze_tokens_delta(**context) -> Dict[str, Any]:
                 StructField("logo_uri", StringType(), True),
                 StructField("name", StringType(), True),
                 StructField("symbol", StringType(), True),
-                StructField("decimals", IntegerType(), True),
+                StructField("decimals", LongType(), True),
                 StructField("market_cap", DoubleType(), True),
                 StructField("fdv", DoubleType(), True),
                 StructField("liquidity", DoubleType(), True),
-                StructField("last_trade_unix_time", IntegerType(), True),
+                StructField("last_trade_unix_time", LongType(), True),
                 StructField("volume_1h_usd", DoubleType(), True),
                 StructField("volume_1h_change_percent", DoubleType(), True),
                 StructField("volume_2h_usd", DoubleType(), True),
@@ -122,19 +122,19 @@ def create_bronze_tokens_delta(**context) -> Dict[str, Any]:
                 StructField("volume_8h_change_percent", DoubleType(), True),
                 StructField("volume_24h_usd", DoubleType(), True),
                 StructField("volume_24h_change_percent", DoubleType(), True),
-                StructField("trade_1h_count", IntegerType(), True),
-                StructField("trade_2h_count", IntegerType(), True),
-                StructField("trade_4h_count", IntegerType(), True),
-                StructField("trade_8h_count", IntegerType(), True),
-                StructField("trade_24h_count", IntegerType(), True),
+                StructField("trade_1h_count", LongType(), True),
+                StructField("trade_2h_count", LongType(), True),
+                StructField("trade_4h_count", LongType(), True),
+                StructField("trade_8h_count", LongType(), True),
+                StructField("trade_24h_count", LongType(), True),
                 StructField("price", DoubleType(), True),
                 StructField("price_change_1h_percent", DoubleType(), True),
                 StructField("price_change_2h_percent", DoubleType(), True),
                 StructField("price_change_4h_percent", DoubleType(), True),
                 StructField("price_change_8h_percent", DoubleType(), True),
                 StructField("price_change_24h_percent", DoubleType(), True),
-                StructField("holder", IntegerType(), True),
-                StructField("recent_listing_time", IntegerType(), True)
+                StructField("holder", LongType(), True),
+                StructField("recent_listing_time", LongType(), True)
             ])
             
             # Convert to Spark DataFrame with explicit schema
