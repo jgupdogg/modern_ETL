@@ -12,6 +12,9 @@ from airflow.decorators import task
 from airflow.utils.dates import days_ago
 from airflow.utils.trigger_rule import TriggerRule
 
+# Import PySpark functions needed for state tracking
+from pyspark.sql.functions import col, lit, when, current_timestamp
+
 # Import centralized configuration
 from config.smart_trader_config import (
     # DAG Configuration
