@@ -131,10 +131,10 @@ MINIO_ACCESS_KEY = 'minioadmin'
 MINIO_SECRET_KEY = 'minioadmin123'
 MINIO_BUCKET = 'solana-data'
 
-# PySpark Configuration - OPTIMIZED FOR WALLET PNL PROCESSING
-SPARK_DRIVER_MEMORY = '2g'      # Increased for processing 400+ wallets
-SPARK_EXECUTOR_MEMORY = '2g'    # Increased for Delta Lake operations
-SPARK_DRIVER_MAX_RESULT_SIZE = '1g'  # Increased for larger result sets
+# PySpark Configuration - CONSERVATIVE MEMORY SETTINGS TO PREVENT CRASHES
+SPARK_DRIVER_MEMORY = '1g'      # Reduced to prevent OOM crashes
+SPARK_EXECUTOR_MEMORY = '1g'    # Reduced for stability
+SPARK_DRIVER_MAX_RESULT_SIZE = '512m'  # Reduced to prevent large result crashes
 
 # Package Versions for PySpark 3.5.0 + Delta Lake
 # Using actually available and working versions

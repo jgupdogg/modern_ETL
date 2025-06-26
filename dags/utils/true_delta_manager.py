@@ -203,7 +203,7 @@ class TrueDeltaLakeManager:
             raise
     
     def merge_data(self, df: DataFrame, table_path: str, merge_condition: str,
-                   update_set: Dict[str, str], insert_values: Dict[str, str]) -> int:
+                   update_set: Dict[str, str], insert_values: Dict[str, str] = None) -> int:
         """
         Perform TRUE MERGE operation with automatic versioning
         
@@ -212,7 +212,7 @@ class TrueDeltaLakeManager:
             table_path: Target Delta table path
             merge_condition: SQL condition for matching records
             update_set: Columns to update when matched
-            insert_values: Columns to insert when not matched
+            insert_values: Columns to insert when not matched (optional)
             
         Returns:
             New version number
@@ -231,13 +231,17 @@ class TrueDeltaLakeManager:
             
             delta_table = DeltaTable.forPath(self.spark, table_path)
             
-            # Execute TRUE MERGE operation
-            delta_table.alias("target").merge(
+            # Build MERGE operation
+            merge_builder = delta_table.alias("target").merge(
                 df_with_metadata.alias("source"),
                 merge_condition
-            ).whenMatchedUpdate(set=update_set) \
-             .whenNotMatchedInsert(values=insert_values) \
-             .execute()
+            ).whenMatchedUpdate(set=update_set)
+            
+            # Only add insert clause if insert_values provided
+            if insert_values:
+                merge_builder = merge_builder.whenNotMatchedInsert(values=insert_values)
+            
+            merge_builder.execute()
             
             version = self.get_table_version(table_path)
             # Skip count() to avoid JVM crashes in Docker

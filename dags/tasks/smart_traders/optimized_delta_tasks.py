@@ -589,28 +589,33 @@ def create_bronze_transactions_delta(**context) -> Dict[str, Any]:
             # Read current silver tracked whales table
             silver_whales_path = get_table_path("silver_whales")
             if delta_manager.table_exists(silver_whales_path):
-                silver_whales_df = delta_manager.spark.read.format("delta").load(silver_whales_path)
+                # Create update DataFrame for processed whales
+                update_data = []
+                for whale_id in processed_whale_ids:
+                    update_data.append({
+                        "whale_id": whale_id,
+                        "txns_fetch_status": "completed",
+                        "txns_fetched": True,
+                        "txns_last_fetched_at": datetime.now().isoformat(),
+                        "_delta_timestamp": datetime.now(),
+                        "_delta_operation": "TRANSACTION_STATUS_UPDATE"
+                    })
                 
-                # Update processing_status for processed whales
-                updated_silver_whales_df = silver_whales_df.withColumn(
-                    "processing_status",
-                    when(col("whale_id").isin(processed_whale_ids), lit("processed"))
-                    .otherwise(col("processing_status"))
-                ).withColumn(
-                    "txns_last_fetched_at",
-                    when(col("whale_id").isin(processed_whale_ids), current_timestamp().cast("string"))
-                    .otherwise(col("txns_last_fetched_at"))
-                ).withColumn(
-                    "_delta_timestamp", current_timestamp()
-                ).withColumn(
-                    "_delta_operation",
-                    when(col("whale_id").isin(processed_whale_ids), lit("TRANSACTION_STATUS_UPDATE"))
-                    .otherwise(lit("SILVER_WHALE_UPDATE"))
-                )
-                
-                # Write updated silver whales table back with schema evolution
-                updated_silver_whales_df.write.format("delta").mode("overwrite").option("mergeSchema", "true").save(silver_whales_path)
-                logger.info(f"Updated processing_status to 'processed' for {len(processed_whale_ids)} whales")
+                if update_data:
+                    updates_df = delta_manager.spark.createDataFrame(update_data)
+                    
+                    # Use MERGE to update only the specific whales
+                    merge_condition = "target.whale_id = source.whale_id"
+                    update_set = {
+                        "txns_fetch_status": "source.txns_fetch_status",
+                        "txns_fetched": "source.txns_fetched",
+                        "txns_last_fetched_at": "source.txns_last_fetched_at",
+                        "_delta_timestamp": "source._delta_timestamp",
+                        "_delta_operation": "source._delta_operation"
+                    }
+                    
+                    delta_manager.merge_data(updates_df, silver_whales_path, merge_condition, update_set, insert_values=None)
+                    logger.info(f"Updated txns_fetch_status to 'completed' for {len(processed_whale_ids)} whales using MERGE")
         
         logger.info(f"Bronze transactions: {len(all_transaction_data)} records from {whales_count} wallets → Delta v{version} ({operation})")
         
@@ -634,6 +639,10 @@ def create_silver_wallet_pnl_delta(**context) -> Dict[str, Any]:
     
     try:
         delta_manager = TrueDeltaLakeManager()
+        
+        # Import memory monitoring tools
+        import gc
+        import psutil
         
         # Read from silver whales to find wallets needing PnL processing
         silver_whales_path = get_table_path("silver_whales")
@@ -667,12 +676,10 @@ def create_silver_wallet_pnl_delta(**context) -> Dict[str, Any]:
         
         logger.info(f"Found {len(all_wallet_addresses)} total wallets needing PnL processing - will process ONE AT A TIME")
         
-        # Get bronze transactions table once (outside the loop for efficiency)
+        # Get bronze transactions table path (but don't load full table)
         bronze_transactions_path = get_table_path("bronze_transactions")
         if not delta_manager.table_exists(bronze_transactions_path):
             return {"status": "no_transactions", "records": 0}
-        
-        bronze_transactions_df = delta_manager.spark.read.format("delta").load(bronze_transactions_path)
         
         # Initialize counters
         processed_wallets = []
@@ -688,6 +695,13 @@ def create_silver_wallet_pnl_delta(**context) -> Dict[str, Any]:
         # PROCESS ALL WALLETS ONE AT A TIME (memory safe with timeout)
         for idx, wallet_address in enumerate(all_wallet_addresses, 1):
             try:
+                # Check memory usage before processing each wallet
+                memory_percent = psutil.virtual_memory().percent
+                if memory_percent > 80:
+                    logger.warning(f"⚠️ High memory usage: {memory_percent}%. Stopping processing to prevent crash.")
+                    logger.info(f"Processed {idx-1} wallets before memory limit. {len(all_wallet_addresses) - idx + 1} remaining.")
+                    break
+                
                 # Check if we've exceeded max processing time
                 elapsed_time = time.time() - start_time
                 if elapsed_time > max_processing_seconds:
@@ -697,12 +711,20 @@ def create_silver_wallet_pnl_delta(**context) -> Dict[str, Any]:
                     break
                 
                 logger.info(f"Processing wallet {idx}/{len(all_wallet_addresses)}: {wallet_address} "
-                          f"(elapsed: {elapsed_time/60:.1f} minutes)")
+                          f"(elapsed: {elapsed_time/60:.1f} minutes, memory: {memory_percent}%)")
                 
                 # Process single wallet PnL calculation
                 single_wallet_result = _process_single_wallet_pnl(
-                    delta_manager, wallet_address, bronze_transactions_df, context
+                    delta_manager, wallet_address, bronze_transactions_path, context
                 )
+                
+                # CRITICAL: Clear Spark cache after each wallet to prevent memory buildup
+                delta_manager.spark.catalog.clearCache()
+                
+                # Force garbage collection every 10 wallets
+                if idx % 10 == 0:
+                    gc.collect()
+                    logger.info(f"🧹 Cleared cache and ran garbage collection after {idx} wallets")
                 
                 # Check if processing was successful or completed (even with no data)
                 if single_wallet_result["status"] in ["success", "no_transactions", "no_valid_transactions"]:
@@ -764,18 +786,23 @@ def create_silver_wallet_pnl_delta(**context) -> Dict[str, Any]:
             delta_manager.stop()
 
 
-def _process_single_wallet_pnl(delta_manager, wallet_address: str, bronze_transactions_df, context) -> Dict[str, Any]:
+def _process_single_wallet_pnl(delta_manager, wallet_address: str, bronze_transactions_path: str, context) -> Dict[str, Any]:
     """Process PnL calculation for a single wallet (memory safe)"""
     logger = logging.getLogger(__name__)
     
     try:
-        # Filter transactions for this specific wallet
-        filtered_transactions = bronze_transactions_df.filter(
-            (col("tx_type") == "swap") &
-            (col("wallet_address") == wallet_address) &
-            (col("whale_id").isNotNull()) &
-            (col("transaction_hash").isNotNull())
-        ).dropDuplicates(["transaction_hash"])  # Ensure unique transactions only
+        # MEMORY OPTIMIZATION: Load only transactions for this specific wallet
+        bronze_transactions_df = delta_manager.spark.read.format("delta") \
+            .load(bronze_transactions_path) \
+            .filter(
+                (col("tx_type") == "swap") &
+                (col("wallet_address") == wallet_address) &
+                (col("whale_id").isNotNull()) &
+                (col("transaction_hash").isNotNull())
+            ).dropDuplicates(["transaction_hash"])  # Ensure unique transactions only
+        
+        # Rename to filtered_transactions for consistency
+        filtered_transactions = bronze_transactions_df
         
         # Check if wallet has any transactions
         if not filtered_transactions.take(1):
@@ -991,29 +1018,36 @@ def _update_wallet_pnl_status(delta_manager, wallet_addresses: list, status: str
             logger.warning("Silver whales table does not exist for status update")
             return
         
-        # Read current silver whales table
-        silver_whales_df = delta_manager.spark.read.format("delta").load(silver_whales_path)
+        # Create a DataFrame with just the updates for the specific wallets
+        from pyspark.sql import Row
+        update_data = []
+        for wallet_addr in wallet_addresses:
+            update_data.append({
+                "wallet_address": wallet_addr,
+                "pnl_processing_status": status,
+                "pnl_last_processed_at": datetime.now().isoformat(),
+                "_delta_timestamp": datetime.now(),
+                "_delta_operation": "PNL_STATUS_UPDATE"
+            })
         
-        # Update pnl_processing_status and pnl_last_processed_at for processed wallets
-        updated_silver_whales_df = silver_whales_df.withColumn(
-            "pnl_processing_status",
-            when(col("wallet_address").isin(wallet_addresses), lit(status))
-            .otherwise(col("pnl_processing_status"))
-        ).withColumn(
-            "pnl_last_processed_at",
-            when(col("wallet_address").isin(wallet_addresses), current_timestamp().cast("string"))
-            .otherwise(col("pnl_last_processed_at"))
-        ).withColumn(
-            "_delta_timestamp", current_timestamp()
-        ).withColumn(
-            "_delta_operation",
-            when(col("wallet_address").isin(wallet_addresses), lit("PNL_STATUS_UPDATE"))
-            .otherwise(lit("SILVER_WHALE_NO_CHANGE"))
-        )
+        if not update_data:
+            return
         
-        # Write updated silver whales table back with schema evolution
-        updated_silver_whales_df.write.format("delta").mode("overwrite").option("mergeSchema", "true").save(silver_whales_path)
-        logger.info(f"Updated pnl_processing_status to '{status}' for {len(wallet_addresses)} wallets")
+        # Create DataFrame from update data
+        updates_df = delta_manager.spark.createDataFrame(update_data)
+        
+        # Use MERGE to update only the specific wallets
+        merge_condition = "target.wallet_address = source.wallet_address"
+        update_set = {
+            "pnl_processing_status": "source.pnl_processing_status",
+            "pnl_last_processed_at": "source.pnl_last_processed_at",
+            "_delta_timestamp": "source._delta_timestamp",
+            "_delta_operation": "source._delta_operation"
+        }
+        
+        # Note: We don't insert new records, only update existing ones
+        delta_manager.merge_data(updates_df, silver_whales_path, merge_condition, update_set, insert_values=None)
+        logger.info(f"Updated pnl_processing_status to '{status}' for {len(wallet_addresses)} wallets using MERGE")
         
     except Exception as e:
         logger.error(f"Failed to update wallet PnL status: {str(e)}")
