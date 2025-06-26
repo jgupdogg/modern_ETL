@@ -645,17 +645,35 @@ def create_gold_smart_traders(**context):
 
 @task(trigger_rule=TriggerRule.ALL_DONE)
 def update_helius_webhooks(**context):
-    """Update Helius webhooks with top traders from Delta Lake (optional)"""
+    """Update Helius webhooks with top traders from Delta Lake"""
     logger = logging.getLogger(__name__)
     
     try:
-        # This remains optional - can be implemented later
-        logger.info("✅ Helius update: Skipped (optional step)")
-        return {"status": "skipped", "addresses_updated": 0}
+        from tasks.helius_tasks import update_helius_webhook
+        result = update_helius_webhook(**context)
+        
+        if result and isinstance(result, dict):
+            status = result.get('status', 'unknown')
+            addresses_count = result.get('addresses_count', 0)
+            
+            if status == "success":
+                logger.info(f"✅ Helius webhook updated with {addresses_count} smart trader addresses")
+                return {"status": "success", "addresses_updated": addresses_count}
+            elif status == "skipped":
+                reason = result.get('reason', 'unknown')
+                logger.info(f"⚠️ Helius update skipped: {reason}")
+                return {"status": "skipped", "reason": reason, "addresses_updated": 0}
+            else:
+                error = result.get('error', 'Unknown error')
+                logger.warning(f"⚠️ Helius update failed: {error}")
+                return {"status": "failed", "error": error, "addresses_updated": 0}
+        else:
+            logger.warning("⚠️ Helius update returned unexpected result")
+            return {"status": "failed", "error": "Unexpected result format", "addresses_updated": 0}
             
     except Exception as e:
         logger.warning(f"⚠️ Helius update failed: {str(e)}")
-        return {"status": "failed", "error": str(e)}
+        return {"status": "failed", "error": str(e), "addresses_updated": 0}
 
 # DAG Definition
 default_args = {

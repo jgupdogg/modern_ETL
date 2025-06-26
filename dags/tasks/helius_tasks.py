@@ -44,15 +44,15 @@ def read_latest_gold_traders() -> List[Dict[str, Any]]:
     s3_client = get_minio_client()
     
     try:
-        # List all gold top trader files
+        # List all gold smart traders files
         response = s3_client.list_objects_v2(
             Bucket=MINIO_BUCKET,
-            Prefix='gold/top_traders/',
+            Prefix='gold/smart_traders_delta/',
             MaxKeys=1000
         )
         
         if 'Contents' not in response:
-            logger.warning("No gold top trader files found")
+            logger.warning("No gold smart traders files found")
             return []
         
         # Filter for parquet files and sort by last modified
@@ -63,7 +63,7 @@ def read_latest_gold_traders() -> List[Dict[str, Any]]:
         ]
         
         if not parquet_files:
-            logger.warning("No parquet files found in gold top traders")
+            logger.warning("No parquet files found in gold smart traders")
             return []
         
         # Sort by last modified to get most recent files
@@ -81,7 +81,7 @@ def read_latest_gold_traders() -> List[Dict[str, Any]]:
             try:
                 # Download and read parquet file
                 obj_response = s3_client.get_object(
-                    Bucket='solana-data', 
+                    Bucket=MINIO_BUCKET, 
                     Key=file_obj['Key']
                 )
                 parquet_data = obj_response['Body'].read()
