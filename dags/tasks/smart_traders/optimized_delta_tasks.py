@@ -863,19 +863,28 @@ def _process_single_wallet_pnl(delta_manager, wallet_address: str, bronze_transa
         
         # Step 5: Join sells with the appropriate cost basis
         # For each sell, find the latest buy that occurred before it
-        sells_with_cost_basis = sells_df.join(
-            buys_for_matching,
-            (sells_df.wallet_address == buys_for_matching.wallet_address) &
-            (sells_df.base_address == buys_for_matching.base_address) &
-            (buys_for_matching.buy_timestamp <= sells_df.timestamp),
+        # Alias the dataframes to avoid ambiguous column references
+        sells_df_aliased = sells_df.alias("sell")
+        buys_for_matching_aliased = buys_for_matching.alias("buy")
+        
+        sells_with_cost_basis = sells_df_aliased.join(
+            buys_for_matching_aliased,
+            (col("sell.wallet_address") == col("buy.wallet_address")) &
+            (col("sell.base_address") == col("buy.base_address")) &
+            (col("buy.buy_timestamp") <= col("sell.timestamp")),
             "left"
+        ).select(
+            col("sell.*"),
+            col("buy.cost_basis_at_time"),
+            col("buy.tokens_available"),
+            col("buy.buy_timestamp")
         )
         
         # Get the latest cost basis for each sell (in case multiple buys occurred before)
         sell_window = Window.partitionBy(
-            sells_with_cost_basis.wallet_address, 
-            sells_with_cost_basis.base_address,
-            sells_with_cost_basis.timestamp
+            "wallet_address", 
+            "base_address",
+            "timestamp"
         ).orderBy(col("buy_timestamp").desc())
         
         sells_with_latest_cost = sells_with_cost_basis.withColumn(
