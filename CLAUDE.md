@@ -119,8 +119,8 @@ SPARK_EXECUTOR_MEMORY = '1g'             # Reduced from 4g
 SPARK_DRIVER_MAX_RESULT_SIZE = '512m'    # Reduced from 2g
 
 # Batch processing limits
-SILVER_PNL_WALLET_BATCH_SIZE = 5         # Process 5 wallets at a time
-SILVER_PNL_MAX_TRANSACTIONS_PER_BATCH = 500  # Limit transactions per batch
+SILVER_PNL_WALLET_BATCH_SIZE = 10        # Process 10 wallets at a time for excellent performance
+SILVER_PNL_MAX_TRANSACTIONS_PER_BATCH = 100  # Limit transactions per batch
 ```
 
 ## MinIO Commands
@@ -150,10 +150,11 @@ docker exec claude_pipeline-minio mc cat local/smart-trader/bronze/token_metrics
 - **Column Reference Fix**: Resolved `_delta_operation` column errors in state tracking
 - **Table Existence Detection**: Improved validation to prevent false positive table detection
 - **BirdEye API Schema Update**: Updated field normalization to handle API's transition from camelCase to snake_case
-- **Wallet PnL Processing Fix**: Now processes ALL wallets needing PnL calculations (one at a time for memory safety)
+- **Wallet PnL Processing Fix**: Now processes ALL wallets needing PnL calculations (in batches of 10 for optimal performance)
   - Properly handles wallets with no transactions or no valid USD transactions  
   - Prevents infinite reprocessing of failed/empty wallets
   - Marks all processed wallets as completed regardless of outcome
+  - Batched status updates (1 MERGE per 10 wallets instead of individual updates)
 
 **Key Changes Made**:
 ```bash
@@ -172,6 +173,33 @@ MERGE on transaction_hash            # Bronze transactions: Prevents duplicates
 MERGE on wallet+token+date           # Silver PnL: Updates calculations, inserts new
 dropDuplicates(["transaction_hash"]) # Silver PnL: Ensures unique transactions
 ```
+
+**Recent Performance Optimizations (2025-06-26)**:
+
+**Batch Processing Improvements**:
+- **Increased Wallet Batch Size**: From 1 → 4 → 10 wallets per batch for optimal performance
+- **Batch MERGE Operations**: Collect status updates for entire batch and perform single MERGE instead of individual updates
+- **MERGE Conflict Resolution**: Fixed duplicate key issues by using composite keys (transaction_hash + base_address, wallet_address + token_address)
+- **Clean Aggregate Logging**: Batch summaries show counts of wallets with PnL data, no transactions, no valid transactions, and failures
+- **Memory Safety**: Maintained conservative memory settings with improved batch processing efficiency
+
+**MERGE Operation Optimizations**:
+```bash
+# Bronze Transactions: Uses transaction_hash + base_address composite key
+MERGE condition: "target.transaction_hash = source.transaction_hash AND target.base_address = source.base_address"
+
+# Silver Whales: Uses whale_id (wallet_address + token_address composite)  
+MERGE condition: "target.whale_id = source.whale_id"
+
+# Silver PnL: Uses wallet_address + token_address + calculation_date
+MERGE condition: "target.wallet_address = source.wallet_address AND target.token_address = source.token_address AND target.calculation_date = source.calculation_date"
+```
+
+**Performance Benefits**:
+- ✅ **10x Fewer Status Updates**: 1 MERGE per 10 wallets instead of 10 individual MERGEs
+- ✅ **Faster Processing**: 10 wallets processed sequentially per batch with efficient resource usage
+- ✅ **No Duplicate Key Conflicts**: Proper composite keys prevent MERGE failures
+- ✅ **Clean Logging**: Aggregate batch metrics instead of verbose individual wallet logs
 
 **Table Clearing Commands**:
 ```bash
