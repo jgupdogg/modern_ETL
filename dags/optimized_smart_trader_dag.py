@@ -544,8 +544,6 @@ def create_gold_smart_traders(**context):
                 first_transaction,
                 last_transaction,
                 current_position_tokens,
-                current_position_cost_basis,
-                current_position_value,
                 realized_pnl,
                 unrealized_pnl,
                 total_pnl,

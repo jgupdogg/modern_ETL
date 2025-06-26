@@ -557,7 +557,17 @@ def create_bronze_transactions_delta(**context) -> Dict[str, Any]:
         ])
         
         df = delta_manager.spark.createDataFrame(all_transaction_data, schema=transaction_schema)
-        df_with_metadata = df.withColumn("_delta_timestamp", current_timestamp()) \
+        
+        # Deduplicate by transaction_hash + base_address to prevent MERGE conflicts
+        # This keeps unique combinations of transaction and token
+        original_count = df.count()
+        df_deduped = df.dropDuplicates(["transaction_hash", "base_address"])
+        deduped_count = df_deduped.count()
+        
+        if original_count > deduped_count:
+            logger.info(f"Removed {original_count - deduped_count} duplicate transaction-token pairs from {original_count} total transactions")
+        
+        df_with_metadata = df_deduped.withColumn("_delta_timestamp", current_timestamp()) \
                             .withColumn("_delta_operation", lit("BRONZE_TRANSACTION_CREATE")) \
                             .withColumn("transaction_date", to_date(col("timestamp"))) \
                             .withColumn("_delta_created_at", lit(datetime.now().isoformat()))
@@ -566,10 +576,11 @@ def create_bronze_transactions_delta(**context) -> Dict[str, Any]:
         table_config = get_table_config("bronze_transactions")
         
         if delta_manager.table_exists(table_path):
-            # Use MERGE to prevent duplicate transactions based on transaction_hash
-            merge_condition = "target.transaction_hash = source.transaction_hash"
+            # Use MERGE to prevent duplicate transactions based on transaction_hash AND base_address (token)
+            # This handles cases where same transaction involves multiple tokens
+            merge_condition = "target.transaction_hash = source.transaction_hash AND target.base_address = source.base_address"
             source_columns = [c for c in df_with_metadata.columns if not c.startswith("_delta")]
-            update_set = {c: f"source.{c}" for c in source_columns if c != "transaction_hash"}
+            update_set = {c: f"source.{c}" for c in source_columns if c not in ["transaction_hash", "base_address"]}
             insert_values = {c: f"source.{c}" for c in df_with_metadata.columns}
             version = delta_manager.merge_data(df_with_metadata, table_path, merge_condition, update_set, insert_values)
             operation = "MERGE"
@@ -584,12 +595,13 @@ def create_bronze_transactions_delta(**context) -> Dict[str, Any]:
         # Update silver tracked whales processing_status to 'processed' for processed whales
         # This handles both new whales and whales being refetched after 2 weeks
         if whales_count > 0 and len(all_transaction_data) > 0:
-            processed_whale_ids = [whale_data['whale_id'] for whale_data in whales_list]
+            # Deduplicate whale_ids to prevent MERGE conflicts
+            processed_whale_ids = list(set([whale_data['whale_id'] for whale_data in whales_list]))
             
             # Read current silver tracked whales table
             silver_whales_path = get_table_path("silver_whales")
             if delta_manager.table_exists(silver_whales_path):
-                # Create update DataFrame for processed whales
+                # Create update DataFrame for processed whales (already deduplicated)
                 update_data = []
                 for whale_id in processed_whale_ids:
                     update_data.append({
