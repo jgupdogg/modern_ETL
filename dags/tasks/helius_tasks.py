@@ -22,9 +22,10 @@ from airflow.models import Variable
 from config.smart_trader_config import (
     HELIUS_API_BASE_URL, HELIUS_MAX_ADDRESSES, HELIUS_WEBHOOK_TYPE,
     HELIUS_TRANSACTION_TYPES, HELIUS_TIER_PRIORITY, HELIUS_REQUEST_TIMEOUT,
-    MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, MINIO_BUCKET,
     GOLD_TOP_TRADERS_PATH
 )
+# Import Delta Lake MinIO configuration
+from config.true_delta_config import MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, MINIO_BUCKET
 
 
 def get_minio_client() -> boto3.client:
@@ -39,59 +40,72 @@ def get_minio_client() -> boto3.client:
 
 
 def read_latest_gold_traders() -> List[Dict[str, Any]]:
-    """Read the latest gold smart traders from Delta Lake"""
+    """Read the latest gold smart traders using DuckDB"""
     logger = logging.getLogger(__name__)
     
     try:
-        from utils.true_delta_manager import TrueDeltaLakeManager, get_table_path
+        import duckdb
         
-        # Use Delta Lake manager to read the gold traders table
-        delta_manager = TrueDeltaLakeManager()
+        # Create DuckDB connection
+        conn = duckdb.connect(':memory:')
         
-        try:
-            gold_traders_path = get_table_path("gold_traders")
-            if not delta_manager.table_exists(gold_traders_path):
-                logger.warning("Gold smart traders Delta table does not exist")
-                return []
-            
-            # Read the entire gold traders Delta table
-            gold_df = delta_manager.spark.read.format("delta").load(gold_traders_path)
-            
-            # Convert to pandas for easier manipulation
-            gold_pandas = gold_df.toPandas()
-            
-            if gold_pandas.empty:
-                logger.warning("Gold smart traders table is empty")
-                return []
-            
-            # Convert to list of dicts
-            all_traders = gold_pandas.to_dict('records')
-            
-            # Sort by performance tier and total_pnl
-            tier_order = {tier: i for i, tier in enumerate(HELIUS_TIER_PRIORITY)}
-            all_traders.sort(
-                key=lambda x: (
-                    tier_order.get(x.get('performance_tier', 'QUALIFIED'), 999),
-                    -x.get('total_pnl', 0)  # Descending by PnL
-                )
-            )
-            
-            logger.info(f"Total gold traders read from Delta Lake: {len(all_traders)}")
-            
-            # Log performance tier breakdown
-            tier_counts = {}
-            for trader in all_traders:
-                tier = trader.get('performance_tier', 'UNKNOWN')
-                tier_counts[tier] = tier_counts.get(tier, 0) + 1
-            logger.info(f"Performance tier breakdown: {tier_counts}")
-            
-            return all_traders
-            
-        finally:
-            delta_manager.stop()
+        # Install and load httpfs for S3 access
+        conn.execute("INSTALL httpfs;")
+        conn.execute("LOAD httpfs;")
+        
+        # Configure S3 settings for MinIO
+        conn.execute(f"SET s3_endpoint='{MINIO_ENDPOINT.replace('http://', '')}';")
+        conn.execute(f"SET s3_access_key_id='{MINIO_ACCESS_KEY}';")
+        conn.execute(f"SET s3_secret_access_key='{MINIO_SECRET_KEY}';")
+        conn.execute("SET s3_use_ssl=false;")
+        conn.execute("SET s3_url_style='path';")
+        
+        # Read the entire gold smart traders table
+        query = f"""
+        SELECT 
+            wallet_address,
+            performance_tier,
+            total_pnl,
+            win_rate,
+            trade_count,
+            roi
+        FROM parquet_scan('s3://{MINIO_BUCKET}/gold/smart_traders_delta/**/*.parquet')
+        ORDER BY 
+            CASE 
+                WHEN performance_tier = 'ELITE' THEN 1
+                WHEN performance_tier = 'STRONG' THEN 2  
+                WHEN performance_tier = 'QUALIFIED' THEN 3
+                ELSE 4
+            END,
+            total_pnl DESC
+        """
+        
+        # Execute query and fetch results
+        result = conn.execute(query).fetchall()
+        columns = [desc[0] for desc in conn.description]
+        
+        # Convert to list of dicts
+        all_traders = [dict(zip(columns, row)) for row in result]
+        
+        conn.close()
+        
+        if not all_traders:
+            logger.warning("No gold smart traders found in Delta Lake table")
+            return []
+        
+        logger.info(f"Total gold traders read via DuckDB: {len(all_traders)}")
+        
+        # Log performance tier breakdown
+        tier_counts = {}
+        for trader in all_traders:
+            tier = trader.get('performance_tier', 'UNKNOWN')
+            tier_counts[tier] = tier_counts.get(tier, 0) + 1
+        logger.info(f"Performance tier breakdown: {tier_counts}")
+        
+        return all_traders
         
     except Exception as e:
-        logger.error(f"Error reading gold traders from Delta Lake: {e}")
+        logger.error(f"Error reading gold traders via DuckDB: {e}")
         return []
 
 
