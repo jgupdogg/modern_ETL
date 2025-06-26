@@ -39,81 +39,59 @@ def get_minio_client() -> boto3.client:
 
 
 def read_latest_gold_traders() -> List[Dict[str, Any]]:
-    """Read the latest gold top traders from MinIO"""
+    """Read the latest gold smart traders from Delta Lake"""
     logger = logging.getLogger(__name__)
-    s3_client = get_minio_client()
     
     try:
-        # List all gold smart traders files
-        response = s3_client.list_objects_v2(
-            Bucket=MINIO_BUCKET,
-            Prefix='gold/smart_traders_delta/',
-            MaxKeys=1000
-        )
+        from utils.true_delta_manager import TrueDeltaLakeManager, get_table_path
         
-        if 'Contents' not in response:
-            logger.warning("No gold smart traders files found")
-            return []
+        # Use Delta Lake manager to read the gold traders table
+        delta_manager = TrueDeltaLakeManager()
         
-        # Filter for parquet files and sort by last modified
-        parquet_files = [
-            obj for obj in response['Contents'] 
-            if obj['Key'].endswith('.parquet') and 
-            not obj['Key'].endswith('_SUCCESS')
-        ]
-        
-        if not parquet_files:
-            logger.warning("No parquet files found in gold smart traders")
-            return []
-        
-        # Sort by last modified to get most recent files
-        parquet_files.sort(key=lambda x: x['LastModified'], reverse=True)
-        
-        # Read the most recent batch of files (could be multiple due to partitioning)
-        all_traders = []
-        latest_batch_time = parquet_files[0]['LastModified']
-        
-        for file_obj in parquet_files:
-            # Only read files from the same batch (within 1 hour of latest)
-            if (latest_batch_time - file_obj['LastModified']).total_seconds() > 3600:
-                break
-                
-            try:
-                # Download and read parquet file
-                obj_response = s3_client.get_object(
-                    Bucket=MINIO_BUCKET, 
-                    Key=file_obj['Key']
+        try:
+            gold_traders_path = get_table_path("gold_traders")
+            if not delta_manager.table_exists(gold_traders_path):
+                logger.warning("Gold smart traders Delta table does not exist")
+                return []
+            
+            # Read the entire gold traders Delta table
+            gold_df = delta_manager.spark.read.format("delta").load(gold_traders_path)
+            
+            # Convert to pandas for easier manipulation
+            gold_pandas = gold_df.toPandas()
+            
+            if gold_pandas.empty:
+                logger.warning("Gold smart traders table is empty")
+                return []
+            
+            # Convert to list of dicts
+            all_traders = gold_pandas.to_dict('records')
+            
+            # Sort by performance tier and total_pnl
+            tier_order = {tier: i for i, tier in enumerate(HELIUS_TIER_PRIORITY)}
+            all_traders.sort(
+                key=lambda x: (
+                    tier_order.get(x.get('performance_tier', 'QUALIFIED'), 999),
+                    -x.get('total_pnl', 0)  # Descending by PnL
                 )
-                parquet_data = obj_response['Body'].read()
-                
-                # Read parquet into pandas
-                table = pq.read_table(BytesIO(parquet_data))
-                df = table.to_pandas()
-                
-                # Convert to list of dicts
-                traders = df.to_dict('records')
-                all_traders.extend(traders)
-                
-                logger.info(f"Read {len(traders)} traders from {file_obj['Key']}")
-                
-            except Exception as e:
-                logger.warning(f"Error reading file {file_obj['Key']}: {e}")
-                continue
-        
-        # Sort by performance tier and rank
-        tier_order = {tier: i for i, tier in enumerate(HELIUS_TIER_PRIORITY)}
-        all_traders.sort(
-            key=lambda x: (
-                tier_order.get(x.get('performance_tier', 'promising'), 999),
-                x.get('trader_rank', 999)
             )
-        )
-        
-        logger.info(f"Total gold traders read: {len(all_traders)}")
-        return all_traders
+            
+            logger.info(f"Total gold traders read from Delta Lake: {len(all_traders)}")
+            
+            # Log performance tier breakdown
+            tier_counts = {}
+            for trader in all_traders:
+                tier = trader.get('performance_tier', 'UNKNOWN')
+                tier_counts[tier] = tier_counts.get(tier, 0) + 1
+            logger.info(f"Performance tier breakdown: {tier_counts}")
+            
+            return all_traders
+            
+        finally:
+            delta_manager.stop()
         
     except Exception as e:
-        logger.error(f"Error reading gold traders from MinIO: {e}")
+        logger.error(f"Error reading gold traders from Delta Lake: {e}")
         return []
 
 
