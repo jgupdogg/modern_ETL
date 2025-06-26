@@ -248,40 +248,53 @@ def update_helius_webhook(**context):
         
         logger.info(f"Found {len(wallet_addresses)} unique wallet addresses to monitor")
         
-        # Step 2: Get Helius API key
+        # Step 2: Get Helius API key and webhook ID
         api_key = get_helius_api_key()
         
-        # Step 3: Get or create webhook
-        current_webhook = get_current_webhook(api_key)
+        # Get webhook ID from environment (already exists)
+        try:
+            webhook_id = Variable.get('HELIUS_ID')
+        except:
+            # Fallback to environment variable
+            import os
+            webhook_id = os.environ.get('HELIUS_ID')
+            if not webhook_id:
+                logger.error("HELIUS_ID not found in Airflow Variables or environment")
+                return {
+                    "status": "failed",
+                    "reason": "no_webhook_id",
+                    "timestamp": datetime.utcnow().isoformat()
+                }
         
-        if current_webhook:
-            webhook_id = current_webhook.get('webhookID')
+        logger.info(f"Using existing webhook ID: {webhook_id}")
+        
+        # Step 3: Get current webhook URL (single API call for specific webhook)
+        try:
+            headers = {"Content-Type": "application/json"}
+            response = requests.get(
+                f"{HELIUS_API_BASE_URL}/webhooks/{webhook_id}?api-key={api_key}",
+                headers=headers,
+                timeout=30
+            )
+            response.raise_for_status()
+            
+            current_webhook = response.json()
             webhook_url = current_webhook.get('webhookURL')
             current_addresses = current_webhook.get('accountAddresses', [])
             
             logger.info(f"Current webhook has {len(current_addresses)} addresses")
             
-            # Update existing webhook
-            success = update_webhook(api_key, webhook_id, webhook_url, wallet_addresses)
-            
-            if not success:
-                raise Exception("Failed to update webhook")
-                
-        else:
-            # Create new webhook - need webhook URL from Variable
-            try:
-                webhook_url = Variable.get('HELIUS_WEBHOOK_URL')
-            except:
-                logger.error("No existing webhook and HELIUS_WEBHOOK_URL not set")
-                return {
-                    "status": "failed",
-                    "reason": "no_webhook_url",
-                    "timestamp": datetime.utcnow().isoformat()
-                }
-            
-            webhook_id = create_webhook(api_key, webhook_url, wallet_addresses)
-            if not webhook_id:
-                raise Exception("Failed to create webhook")
+        except Exception as e:
+            logger.error(f"Error fetching webhook details: {e}")
+            # Fallback: try to get URL from environment or use placeholder
+            webhook_url = os.environ.get('HELIUS_WEBHOOK_URL', 'https://webhook-placeholder.com')
+            logger.warning(f"Using fallback webhook URL: {webhook_url}")
+        
+        # Step 4: Update webhook with new addresses
+        success = update_webhook(api_key, webhook_id, webhook_url, wallet_addresses)
+        
+        if not success:
+            raise Exception("Failed to update webhook addresses")
         
         # Step 4: Update tracking variables
         Variable.set("helius_webhook_addresses_count", str(len(wallet_addresses)))
