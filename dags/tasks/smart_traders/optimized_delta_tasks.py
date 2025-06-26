@@ -725,17 +725,17 @@ def create_silver_wallet_pnl_delta(**context) -> Dict[str, Any]:
                                  f"Processed {batch_idx} wallets, {remaining} remaining for next run.")
                     break
                 
-                logger.info(f"Processing batch {batch_num}/{total_batches} ({len(batch_wallets)} wallets): "
-                          f"{', '.join(batch_wallets)} (elapsed: {elapsed_time/60:.1f} minutes, memory: {memory_percent}%)")
+                logger.info(f"Processing batch {batch_num}/{total_batches} ({len(batch_wallets)} wallets) "
+                          f"(elapsed: {elapsed_time/60:.1f} minutes, memory: {memory_percent}%)")
                 
                 # Process batch of wallets
                 batch_successful_wallets = []
                 batch_failed_wallets = []
+                batch_with_data = 0
+                batch_no_transactions = 0
+                batch_no_valid_transactions = 0
                 
-                for wallet_idx, wallet_address in enumerate(batch_wallets):
-                    wallet_num = batch_idx + wallet_idx + 1
-                    logger.info(f"  Processing wallet {wallet_num}/{len(all_wallet_addresses)}: {wallet_address}")
-                    
+                for wallet_address in batch_wallets:
                     # Process single wallet PnL calculation
                     single_wallet_result = _process_single_wallet_pnl(
                         delta_manager, wallet_address, bronze_transactions_path, context
@@ -747,21 +747,26 @@ def create_silver_wallet_pnl_delta(**context) -> Dict[str, Any]:
                         batch_successful_wallets.append(wallet_address)
                         total_pnl_records += single_wallet_result.get("pnl_records", 0)
                         
+                        # Count result types
                         if single_wallet_result["status"] == "success":
-                            logger.info(f"    ✅ Wallet {wallet_address} processed successfully with PnL data")
-                        else:
-                            logger.info(f"    ✅ Wallet {wallet_address} processed - {single_wallet_result['status']} (marked completed)")
+                            batch_with_data += 1
+                        elif single_wallet_result["status"] == "no_transactions":
+                            batch_no_transactions += 1
+                        elif single_wallet_result["status"] == "no_valid_transactions":
+                            batch_no_valid_transactions += 1
                     else:
                         failed_wallets.append(wallet_address)
                         batch_failed_wallets.append(wallet_address)
-                        error_msg = single_wallet_result.get('error', f"Status: {single_wallet_result.get('status', 'unknown')}")
-                        logger.warning(f"    ❌ Wallet {wallet_address} failed: {error_msg}")
                 
                 # Batch update silver_whales status for all wallets in batch
                 all_batch_wallets = batch_successful_wallets + batch_failed_wallets
                 if all_batch_wallets:
                     _update_wallet_pnl_status(delta_manager, all_batch_wallets, "completed")
-                    logger.info(f"  Updated PnL status for {len(all_batch_wallets)} wallets in batch")
+                
+                # Log batch summary
+                logger.info(f"  Batch {batch_num} complete: {batch_with_data} with PnL data, "
+                          f"{batch_no_transactions} no transactions, {batch_no_valid_transactions} no valid transactions, "
+                          f"{len(batch_failed_wallets)} failed")
                 
                 # CRITICAL: Clear Spark cache after each batch to prevent memory buildup
                 delta_manager.spark.catalog.clearCache()
