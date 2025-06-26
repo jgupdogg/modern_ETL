@@ -462,7 +462,11 @@ def fetch_bronze_transactions(**context):
             logger.error(f"❌ Bronze transactions failed: {str(e)}")
         raise
 
-@task
+@task(
+    execution_timeout=timedelta(minutes=45),  # 45 minute timeout for processing 400+ wallets
+    retries=1,  # Allow 1 retry if timeout occurs
+    retry_delay=timedelta(minutes=5)
+)
 def calculate_silver_pnl(**context):
     """Calculate wallet PnL using TRUE Delta Lake with PySpark FIFO methodology"""
     logger = logging.getLogger(__name__)

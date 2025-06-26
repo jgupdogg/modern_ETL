@@ -439,10 +439,22 @@ class TrueDeltaLakeManager:
             }
     
     def stop(self):
-        """Stop Spark session"""
+        """Stop Spark session safely"""
         if self.spark:
-            self.logger.info("🛑 Stopping Spark session")
-            self.spark.stop()
+            try:
+                self.logger.info("🛑 Stopping Spark session")
+                self.spark.stop()
+                self.spark = None
+            except Exception as e:
+                self.logger.warning(f"⚠️ Error stopping Spark session: {str(e)}")
+                # Try to forcefully clear the session
+                try:
+                    from pyspark.sql import SparkSession
+                    SparkSession._instantiatedSession = None
+                    SparkSession._activeSession = None
+                except Exception as clear_error:
+                    self.logger.warning(f"⚠️ Error clearing Spark session: {str(clear_error)}")
+                self.spark = None
 
 
 def get_delta_manager() -> TrueDeltaLakeManager:

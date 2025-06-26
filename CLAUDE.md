@@ -319,8 +319,8 @@ processed=true   status=completed status=completed status=completed =processed  
 - `pnl_processed` (boolean) - Has PnL been calculated for this wallet?
 - `pnl_last_processed_at` (timestamp) - When was PnL last calculated?
 - `pnl_processing_status` ("pending", "completed") - PnL processing status
-- **2-week transaction refresh**: Transactions refetched after 14 days
-- **2-week PnL refresh**: PnL recalculated after 14 days
+- **1-month transaction refresh**: Transactions refetched after 30 days (based on latest transaction timestamp)
+- **1-month PnL refresh**: PnL recalculated after 30 days
 
 **Silver PnL**:
 - `moved_to_gold` (boolean) - Has wallet been processed for gold layer?

@@ -24,15 +24,15 @@ GOLD_MAX_TRADERS_PER_BATCH = 1000     # Max top traders per batch
 # =============================================================================
 
 # Token List Filtering Criteria
-TOKEN_LIMIT = 25                     # Total tokens to fetch (reduced for memory safety)
-MIN_LIQUIDITY = 200000               # Minimum token liquidity
-MAX_LIQUIDITY = 1000000              # Maximum token liquidity  
-MIN_VOLUME_1H_USD = 200000           # Minimum 1-hour volume
-MIN_PRICE_CHANGE_2H_PERCENT = 10     # Minimum 2-hour price change %
+TOKEN_LIMIT = 50                     # Total tokens to fetch (reduced for memory safety)
+MIN_LIQUIDITY = 1000000               # Minimum token liquidity
+MAX_LIQUIDITY = 3000000              # Maximum token liquidity  
+MIN_VOLUME_1H_USD = 100000           # Minimum 1-hour volume
+MIN_PRICE_CHANGE_2H_PERCENT = 0     # Minimum 2-hour price change %
 MIN_PRICE_CHANGE_24H_PERCENT = 30    # Minimum 24-hour price change %
 
 # Whale Data Settings
-MAX_WHALES_PER_TOKEN = 100            # Top N holders to fetch per token
+MAX_WHALES_PER_TOKEN = 500            # Top N holders to fetch per token
 WHALE_REFRESH_DAYS = 7               # Re-fetch whale data if older than N days
 
 # Transaction History Settings  
@@ -72,10 +72,11 @@ PNL_CALCULATION_PRECISION = 6          # Decimal places for PnL calculations
 PNL_BATCH_PROGRESS_INTERVAL = 10      # Log progress every N wallets
 PNL_MAX_PROCESSING_TIME_MINUTES = 30  # Timeout for PnL calculations
 
-# Wallet Batch Processing (Memory Management) - ULTRA CONSERVATIVE FOR STABILITY
-SILVER_PNL_WALLET_BATCH_SIZE = 1       # Process 1 wallet at a time (ultra conservative)
-SILVER_PNL_MAX_TRANSACTIONS_PER_BATCH = 50   # Very small transaction batches (ultra conservative)
-SILVER_PNL_PROCESSING_TIMEOUT_SECONDS = 180  # 3 minutes timeout per wallet (shorter for safety)
+# Wallet Batch Processing (Memory Management) - OPTIMIZED WITH INCREASED MEMORY
+SILVER_PNL_WALLET_BATCH_SIZE = 1       # Still process 1 wallet at a time for accuracy
+SILVER_PNL_MAX_TRANSACTIONS_PER_BATCH = 100   # Increased transaction batch size with more memory
+SILVER_PNL_PROCESSING_TIMEOUT_SECONDS = 300  # 5 minutes timeout per wallet
+SILVER_PNL_CHECKPOINT_INTERVAL = 50     # Save progress every 50 wallets
 
 # =============================================================================
 # GOLD LAYER THRESHOLDS
@@ -130,10 +131,10 @@ MINIO_ACCESS_KEY = 'minioadmin'
 MINIO_SECRET_KEY = 'minioadmin123'
 MINIO_BUCKET = 'solana-data'
 
-# PySpark Configuration - MINIMUM SAFE SETTINGS FOR DELTA LAKE
-SPARK_DRIVER_MEMORY = '1g'      # Minimum for Delta Lake + PySpark 3.5.0
-SPARK_EXECUTOR_MEMORY = '1g'    # Minimum for Delta Lake operations
-SPARK_DRIVER_MAX_RESULT_SIZE = '512m'  # Sufficient for Delta operations
+# PySpark Configuration - OPTIMIZED FOR WALLET PNL PROCESSING
+SPARK_DRIVER_MEMORY = '2g'      # Increased for processing 400+ wallets
+SPARK_EXECUTOR_MEMORY = '2g'    # Increased for Delta Lake operations
+SPARK_DRIVER_MAX_RESULT_SIZE = '1g'  # Increased for larger result sets
 
 # Package Versions for PySpark 3.5.0 + Delta Lake
 # Using actually available and working versions

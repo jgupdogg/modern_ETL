@@ -58,8 +58,18 @@ def create_bronze_tokens_delta(**context) -> Dict[str, Any]:
             "min_price_change_24h_percent": MIN_PRICE_CHANGE_24H_PERCENT
         }
         
+        # Log the configuration values
+        logger.info(f"Bronze tokens configuration:")
+        logger.info(f"  TOKEN_LIMIT: {TOKEN_LIMIT}")
+        logger.info(f"  MIN_LIQUIDITY: ${MIN_LIQUIDITY:,}")
+        logger.info(f"  MAX_LIQUIDITY: ${MAX_LIQUIDITY:,}")
+        logger.info(f"  MIN_VOLUME_1H_USD: ${MIN_VOLUME_1H_USD:,}")
+        logger.info(f"  MIN_PRICE_CHANGE_2H_PERCENT: {MIN_PRICE_CHANGE_2H_PERCENT}%")
+        logger.info(f"  MIN_PRICE_CHANGE_24H_PERCENT: {MIN_PRICE_CHANGE_24H_PERCENT}%")
+        
         # Paginated API fetch
         offset, all_tokens = 0, []
+        api_call_count = 0
         while len(all_tokens) < TOKEN_LIMIT:
             remaining = TOKEN_LIMIT - len(all_tokens)
             current_limit = min(API_PAGINATION_LIMIT, remaining)
@@ -70,23 +80,35 @@ def create_bronze_tokens_delta(**context) -> Dict[str, Any]:
                 **filter_params
             }
             
+            api_call_count += 1
+            logger.info(f"API call #{api_call_count} - Requesting tokens with params: {params}")
+            
             response = birdeye_client.get_token_list(**params)
             tokens_data = birdeye_client.normalize_token_list_response(response)
             
+            logger.info(f"API call #{api_call_count} - Received {len(tokens_data)} tokens")
+            
             if not tokens_data:
+                logger.warning(f"No more tokens returned from API at offset {offset}")
                 break
                 
             all_tokens.extend(tokens_data)
             offset += len(tokens_data)
             
             if len(tokens_data) < current_limit:
+                logger.info(f"Received fewer tokens ({len(tokens_data)}) than requested ({current_limit}), likely end of results")
                 break
                 
             import time
             time.sleep(API_RATE_LIMIT_DELAY)
         
+        logger.info(f"Total tokens fetched from API: {len(all_tokens)}")
+        
         tokens_result = all_tokens[:TOKEN_LIMIT]
+        logger.info(f"Tokens to process (limited to TOKEN_LIMIT): {len(tokens_result)}")
+        
         if not tokens_result:
+            logger.warning("No tokens matched the filter criteria")
             return {"status": "no_data", "records": 0}
         
         # Process tokens in small batches to prevent memory issues
@@ -365,7 +387,7 @@ def create_bronze_whales_delta(**context) -> Dict[str, Any]:
 
 def create_bronze_transactions_delta(**context) -> Dict[str, Any]:
     """Bronze transactions: Silver whales → BirdEye API → Delta Lake
-    Fetches transaction data for whales that need processing or refetching (2-week cycle)
+    Fetches transaction data for whales that need processing or refetching (1-month cycle)
     """
     logger = logging.getLogger(__name__)
     delta_manager = None
@@ -380,24 +402,59 @@ def create_bronze_transactions_delta(**context) -> Dict[str, Any]:
         
         silver_whales_df = delta_manager.spark.read.format("delta").load(silver_whales_path)
         
-        # Filter for whales needing transaction data fetched
-        # Include: 1) New whales (pending/ready status) 
-        #         2) Whales with no fetch timestamp
-        #         3) Whales last fetched more than 2 weeks ago (14 days)
-        whales_needing_transactions = silver_whales_df.filter(
-            (col("processing_status") == "pending") |
-            (col("processing_status") == "ready") |
-            col("txns_last_fetched_at").isNull() |
-            # 2-week refetch logic (14 days)
-            (col("txns_last_fetched_at").isNotNull() & 
-             (datediff(current_timestamp(), col("txns_last_fetched_at")) >= 14))
-        ).select("whale_id", "wallet_address", "token_address", "token_symbol").limit(10)
+        # Check if bronze_transactions table exists
+        bronze_transactions_path = get_table_path("bronze_transactions")
+        bronze_transactions_exists = delta_manager.table_exists(bronze_transactions_path)
+        
+        if bronze_transactions_exists:
+            # Get the latest transaction timestamp for each wallet
+            bronze_transactions_df = delta_manager.spark.read.format("delta").load(bronze_transactions_path)
+            latest_transactions = bronze_transactions_df.groupBy("wallet_address").agg(
+                spark_max("timestamp").alias("latest_transaction_timestamp"),
+                count("*").alias("transaction_count")
+            )
+            
+            # Join with silver whales to find who needs updates
+            whales_with_tx_info = silver_whales_df.join(
+                latest_transactions,
+                silver_whales_df.wallet_address == latest_transactions.wallet_address,
+                "left"
+            )
+            
+            # Filter for whales needing transaction data fetched
+            # Include: 1) New whales (no transactions at all)
+            #         2) Whales with transactions older than 1 month (30 days)
+            #         3) Whales with pending/ready status regardless of transaction age
+            whales_needing_transactions = whales_with_tx_info.filter(
+                # New whales or whales needing processing
+                (col("processing_status") == "pending") |
+                (col("processing_status") == "ready") |
+                # No transactions found
+                col("latest_transaction_timestamp").isNull() |
+                # Transactions older than 1 month (30 days)
+                (col("latest_transaction_timestamp").isNotNull() & 
+                 (datediff(current_timestamp(), col("latest_transaction_timestamp")) >= 30))
+            ).select(
+                silver_whales_df.whale_id.alias("whale_id"),
+                silver_whales_df.wallet_address.alias("wallet_address"),
+                silver_whales_df.token_address.alias("token_address"),
+                silver_whales_df.token_symbol.alias("token_symbol")
+            ).limit(10)
+        else:
+            # If bronze_transactions doesn't exist, fetch for all whales needing transactions
+            whales_needing_transactions = silver_whales_df.filter(
+                (col("processing_status") == "pending") |
+                (col("processing_status") == "ready") |
+                col("txns_last_fetched_at").isNull()
+            ).select("whale_id", "wallet_address", "token_address", "token_symbol").limit(10)
         
         # Collect limited data without count() to avoid crashes
         whales_list = [row.asDict() for row in whales_needing_transactions.collect()]
         if not whales_list:
             return {"status": "no_data", "records": 0}
         whales_count = len(whales_list)
+        
+        logger.info(f"Found {whales_count} whales needing transaction updates (1-month refresh cycle)")
         
         # Get API key and fetch transaction data
         from airflow.models import Variable
@@ -588,13 +645,13 @@ def create_silver_wallet_pnl_delta(**context) -> Dict[str, Any]:
         # Filter for wallets needing PnL processing
         # Include: 1) New wallets (pending PnL status)
         #         2) Wallets with no PnL timestamp  
-        #         3) Wallets last processed more than 2 weeks ago (14 days)
+        #         3) Wallets last processed more than 1 month ago (30 days)
         wallets_needing_pnl = silver_whales_df.filter(
             (col("pnl_processing_status") == "pending") |
             col("pnl_last_processed_at").isNull() |
-            # 2-week refetch logic (14 days)
+            # 1-month refetch logic (30 days)
             (col("pnl_last_processed_at").isNotNull() & 
-             (datediff(current_timestamp(), col("pnl_last_processed_at")) >= 14))
+             (datediff(current_timestamp(), col("pnl_last_processed_at")) >= 30))
         ).select("whale_id", "wallet_address", "token_address", "token_symbol").distinct()
         
         # Check for wallets without count() - use take(1) for efficiency
@@ -622,10 +679,25 @@ def create_silver_wallet_pnl_delta(**context) -> Dict[str, Any]:
         failed_wallets = []
         total_pnl_records = 0
         
-        # PROCESS ALL WALLETS ONE AT A TIME (memory safe)
+        # Add maximum processing time (30 minutes)
+        from config.smart_trader_config import PNL_MAX_PROCESSING_TIME_MINUTES
+        import time
+        start_time = time.time()
+        max_processing_seconds = PNL_MAX_PROCESSING_TIME_MINUTES * 60
+        
+        # PROCESS ALL WALLETS ONE AT A TIME (memory safe with timeout)
         for idx, wallet_address in enumerate(all_wallet_addresses, 1):
             try:
-                logger.info(f"Processing wallet {idx}/{len(all_wallet_addresses)}: {wallet_address}")
+                # Check if we've exceeded max processing time
+                elapsed_time = time.time() - start_time
+                if elapsed_time > max_processing_seconds:
+                    remaining = len(all_wallet_addresses) - idx + 1
+                    logger.warning(f"⏱️ Reached max processing time ({PNL_MAX_PROCESSING_TIME_MINUTES} minutes). "
+                                 f"Processed {idx-1} wallets, {remaining} remaining for next run.")
+                    break
+                
+                logger.info(f"Processing wallet {idx}/{len(all_wallet_addresses)}: {wallet_address} "
+                          f"(elapsed: {elapsed_time/60:.1f} minutes)")
                 
                 # Process single wallet PnL calculation
                 single_wallet_result = _process_single_wallet_pnl(
@@ -664,16 +736,24 @@ def create_silver_wallet_pnl_delta(**context) -> Dict[str, Any]:
                     logger.error(f"Failed to update status for exception wallet {wallet_address}: {status_error}")
                 continue
         
+        # Log final summary
         logger.info(f"PnL Processing Complete: {len(processed_wallets)} successful, {len(failed_wallets)} failed")
         
+        # If we stopped due to timeout, indicate partial completion
+        status = "success"
+        if len(processed_wallets) + len(failed_wallets) < len(all_wallet_addresses):
+            status = "partial_completion"
+            logger.info(f"⏱️ Task completed partially due to timeout. Remaining wallets will be processed in next run.")
+        
         return {
-            "status": "success", 
+            "status": status, 
             "total_wallets_found": len(all_wallet_addresses),
             "wallets_processed": len(processed_wallets),
             "wallets_failed": len(failed_wallets),
             "total_pnl_records": total_pnl_records,
             "processed_wallet_addresses": processed_wallets,
-            "failed_wallet_addresses": failed_wallets
+            "failed_wallet_addresses": failed_wallets,
+            "timeout_reached": status == "partial_completion"
         }
         
     except Exception as e:
@@ -722,46 +802,136 @@ def _process_single_wallet_pnl(delta_manager, wallet_address: str, bronze_transa
         if not transactions_with_usd.take(1):
             return {"status": "no_valid_transactions", "pnl_records": 0}
         
-        # PnL calculations using groupBy
-        wallet_token_pnl = transactions_with_usd.groupBy("wallet_address", "base_address", "base_symbol").agg(
-            spark_sum(when(col("trade_type") == "BUY", col("usd_value")).otherwise(0)).alias("total_bought_usd"),
-            spark_sum(when(col("trade_type") == "SELL", col("usd_value")).otherwise(0)).alias("total_sold_usd"),
-            spark_sum(when(col("trade_type") == "BUY", spark_abs(col("base_ui_change_amount"))).otherwise(0)).alias("tokens_bought"),
-            spark_sum(when(col("trade_type") == "SELL", spark_abs(col("base_ui_change_amount"))).otherwise(0)).alias("tokens_sold"),
-            count(when(col("trade_type") == "BUY", 1)).alias("buy_count"),
-            count(when(col("trade_type") == "SELL", 1)).alias("sell_count"),
-            count("*").alias("total_trades"),
-            avg(when(col("trade_type") == "BUY", col("usd_value") / spark_abs(col("base_ui_change_amount")))).alias("avg_buy_price"),
-            avg(when(col("trade_type") == "SELL", col("usd_value") / spark_abs(col("base_ui_change_amount")))).alias("avg_sell_price"),
-            spark_min("timestamp").alias("first_trade"),
-            spark_max("timestamp").alias("last_trade")
+        # PHASE 1: CORRECTED FIFO-BASED PnL CALCULATION
+        
+        # Step 1: Calculate individual transaction prices
+        transactions_with_prices = transactions_with_usd.withColumn(
+            "token_price", col("usd_value") / spark_abs(col("base_ui_change_amount"))
         )
         
-        # Comprehensive PnL metrics
-        pnl_metrics = wallet_token_pnl.withColumn("current_position_tokens", col("tokens_bought") - col("tokens_sold")) \
-                                     .withColumn("avg_cost_basis", when(col("tokens_bought") > 0, col("total_bought_usd") / col("tokens_bought")).otherwise(0)) \
-                                     .withColumn("realized_pnl", col("total_sold_usd") - (col("tokens_sold") * col("avg_cost_basis"))) \
-                                     .withColumn("current_position_cost_basis", col("current_position_tokens") * col("avg_cost_basis")) \
-                                     .withColumn("current_position_value", col("current_position_tokens") * coalesce(col("avg_sell_price"), col("avg_cost_basis"))) \
-                                     .withColumn("unrealized_pnl", col("current_position_value") - col("current_position_cost_basis")) \
-                                     .withColumn("total_pnl", col("realized_pnl") + col("unrealized_pnl")) \
-                                     .withColumn("roi", when(col("total_bought_usd") > 0, (col("total_pnl") / col("total_bought_usd")) * 100).otherwise(0)) \
-                                     .withColumn("is_profitable", when(col("total_pnl") > 0, 1).otherwise(0))
+        # Step 2: Create windows for chronological processing per token
+        # Window partitioned by wallet and token, ordered by timestamp
+        token_window = Window.partitionBy("wallet_address", "base_address").orderBy("timestamp")
         
-        # Portfolio aggregation
-        portfolio_metrics = pnl_metrics.groupBy("wallet_address").agg(
-            spark_sum("realized_pnl").alias("realized_pnl"),
-            spark_sum("unrealized_pnl").alias("unrealized_pnl"),
-            spark_sum("total_pnl").alias("total_pnl"),
+        # Step 3: Calculate running balances and cost basis for BUY transactions
+        buys_df = transactions_with_prices.filter(col("trade_type") == "BUY") \
+            .withColumn("cumulative_tokens_bought", 
+                       spark_sum(spark_abs(col("base_ui_change_amount"))).over(token_window)) \
+            .withColumn("cumulative_cost_usd", 
+                       spark_sum(col("usd_value")).over(token_window)) \
+            .withColumn("running_avg_cost_basis", 
+                       col("cumulative_cost_usd") / col("cumulative_tokens_bought"))
+        
+        # Step 4: For each SELL, find the cost basis at the time of sale
+        sells_df = transactions_with_prices.filter(col("trade_type") == "SELL")
+        
+        # Create a window for finding the last buy before each sell (ASOF join logic)
+        # Get the running cost basis at the time of each sell
+        buys_for_matching = buys_df.select(
+            "wallet_address", "base_address", "base_symbol", "timestamp", 
+            "running_avg_cost_basis", "cumulative_tokens_bought"
+        ).withColumnRenamed("timestamp", "buy_timestamp") \
+         .withColumnRenamed("running_avg_cost_basis", "cost_basis_at_time") \
+         .withColumnRenamed("cumulative_tokens_bought", "tokens_available")
+        
+        # Step 5: Join sells with the appropriate cost basis
+        # For each sell, find the latest buy that occurred before it
+        sells_with_cost_basis = sells_df.join(
+            buys_for_matching,
+            (sells_df.wallet_address == buys_for_matching.wallet_address) &
+            (sells_df.base_address == buys_for_matching.base_address) &
+            (buys_for_matching.buy_timestamp <= sells_df.timestamp),
+            "left"
+        )
+        
+        # Get the latest cost basis for each sell (in case multiple buys occurred before)
+        sell_window = Window.partitionBy(
+            sells_with_cost_basis.wallet_address, 
+            sells_with_cost_basis.base_address,
+            sells_with_cost_basis.timestamp
+        ).orderBy(col("buy_timestamp").desc())
+        
+        sells_with_latest_cost = sells_with_cost_basis.withColumn(
+            "row_num", row_number().over(sell_window)
+        ).filter(col("row_num") == 1)
+        
+        # Step 6: Calculate realized PnL for each sell transaction
+        sells_with_pnl = sells_with_latest_cost.withColumn(
+            "tokens_sold", spark_abs(col("base_ui_change_amount"))
+        ).withColumn(
+            "sale_proceeds", col("usd_value")
+        ).withColumn(
+            "cost_of_sold_tokens", 
+            when(col("cost_basis_at_time").isNotNull(), 
+                 col("tokens_sold") * col("cost_basis_at_time")).otherwise(0)
+        ).withColumn(
+            "realized_pnl_per_trade",
+            when(col("cost_basis_at_time").isNotNull(),
+                 col("sale_proceeds") - col("cost_of_sold_tokens")).otherwise(0)
+        ).withColumn(
+            "has_cost_basis", col("cost_basis_at_time").isNotNull()
+        )
+        
+        # Step 7: Aggregate per-token metrics
+        token_pnl_summary = sells_with_pnl.groupBy("wallet_address", "base_address", "base_symbol").agg(
+            spark_sum("realized_pnl_per_trade").alias("token_realized_pnl"),
+            spark_sum("sale_proceeds").alias("total_sold_usd"),
+            spark_sum("tokens_sold").alias("total_tokens_sold"),
+            spark_sum("cost_of_sold_tokens").alias("total_cost_of_sold"),
+            count("*").alias("sell_count"),
+            spark_sum(when(col("realized_pnl_per_trade") > 0, 1).otherwise(0)).alias("profitable_sales"),
+            spark_min("timestamp").alias("first_sale"),
+            spark_max("timestamp").alias("last_sale")
+        )
+        
+        # Step 8: Get buy statistics per token
+        buy_summary = buys_df.groupBy("wallet_address", "base_address", "base_symbol").agg(
+            spark_sum(col("usd_value")).alias("total_bought_usd"),
+            spark_sum(spark_abs(col("base_ui_change_amount"))).alias("total_tokens_bought"),
+            count("*").alias("buy_count"),
+            spark_min("timestamp").alias("first_buy"),
+            spark_max("timestamp").alias("last_buy")
+        )
+        
+        # Step 9: Combine buy and sell data for complete token view
+        token_complete_pnl = buy_summary.join(
+            token_pnl_summary,
+            ["wallet_address", "base_address", "base_symbol"],
+            "left"
+        ).fillna(0, ["token_realized_pnl", "total_sold_usd", "total_tokens_sold", 
+                    "total_cost_of_sold", "sell_count", "profitable_sales"])
+        
+        # Calculate token-level metrics
+        token_metrics = token_complete_pnl.withColumn(
+            "net_position_tokens", col("total_tokens_bought") - col("total_tokens_sold")
+        ).withColumn(
+            "token_win_rate", 
+            when(col("sell_count") > 0, (col("profitable_sales") / col("sell_count")) * 100).otherwise(0)
+        ).withColumn(
+            "token_roi",
+            when(col("total_cost_of_sold") > 0, 
+                 (col("token_realized_pnl") / col("total_cost_of_sold")) * 100).otherwise(0)
+        )
+        
+        # Step 10: Portfolio-level aggregation (realized PnL only)
+        portfolio_metrics = token_metrics.groupBy("wallet_address").agg(
+            spark_sum("token_realized_pnl").alias("realized_pnl"),
             spark_sum("total_bought_usd").alias("total_bought"),
             spark_sum("total_sold_usd").alias("total_sold"),
-            spark_sum("total_trades").alias("trade_count"),
-            spark_sum("current_position_cost_basis").alias("current_position_cost_basis"),
-            spark_sum("current_position_value").alias("current_position_value"),
-            spark_min("first_trade").alias("first_transaction"),
-            spark_max("last_trade").alias("last_transaction"),
-            (spark_sum("is_profitable") * 100.0 / count("*")).alias("win_rate"),
-            (spark_sum("total_pnl") / spark_sum("total_bought_usd") * 100).alias("portfolio_roi")
+            spark_sum("total_cost_of_sold").alias("total_cost_of_sold"),
+            spark_sum("buy_count").alias("buy_count"),
+            spark_sum("sell_count").alias("sell_count"),
+            (spark_sum("buy_count") + spark_sum("sell_count")).alias("trade_count"),
+            spark_sum("profitable_sales").alias("total_profitable_sales"),
+            spark_min(coalesce(col("first_buy"), col("first_sale"))).alias("first_transaction"),
+            spark_max(coalesce(col("last_buy"), col("last_sale"))).alias("last_transaction")
+        ).withColumn(
+            "win_rate",
+            when(col("sell_count") > 0, (col("total_profitable_sales") / col("sell_count")) * 100).otherwise(0)
+        ).withColumn(
+            "realized_roi",
+            when(col("total_cost_of_sold") > 0, 
+                 (col("realized_pnl") / col("total_cost_of_sold")) * 100).otherwise(0)
         )
         
         # Add metadata
@@ -775,13 +945,16 @@ def _process_single_wallet_pnl(delta_manager, wallet_address: str, bronze_transa
                                        .withColumn("current_position_tokens", lit(0.0)) \
                                        .withColumn("batch_id", lit(batch_id)) \
                                        .withColumn("processed_at", current_timestamp()) \
-                                       .withColumn("data_source", lit("delta_lake_single_wallet")) \
+                                       .withColumn("data_source", lit("delta_lake_fifo_corrected")) \
                                        .withColumn("moved_to_gold", lit(False)) \
                                        .withColumn("gold_processed_at", lit(None).cast("string")) \
-                                       .withColumn("gold_processing_status", lit("pending"))
+                                       .withColumn("gold_processing_status", lit("pending")) \
+                                       .withColumn("unrealized_pnl", lit(0.0)) \
+                                       .withColumn("total_pnl", col("realized_pnl")) \
+                                       .withColumn("portfolio_roi", col("realized_roi"))
         
-        # Round numeric values
-        for col_name in ["realized_pnl", "unrealized_pnl", "total_pnl", "total_bought", "total_sold", "portfolio_roi", "win_rate"]:
+        # Round numeric values 
+        for col_name in ["realized_pnl", "total_pnl", "total_bought", "total_sold", "realized_roi", "portfolio_roi", "win_rate"]:
             final_pnl_df = final_pnl_df.withColumn(col_name, spark_round(col(col_name), 2))
         
         # Write to Delta Lake
