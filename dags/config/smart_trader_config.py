@@ -73,7 +73,7 @@ PNL_BATCH_PROGRESS_INTERVAL = 10      # Log progress every N wallets
 PNL_MAX_PROCESSING_TIME_MINUTES = 30  # Timeout for PnL calculations
 
 # Wallet Batch Processing (Memory Management) - OPTIMIZED WITH INCREASED MEMORY
-SILVER_PNL_WALLET_BATCH_SIZE = 1       # Still process 1 wallet at a time for accuracy
+SILVER_PNL_WALLET_BATCH_SIZE = 4       # Process 4 wallets at a time for better performance
 SILVER_PNL_MAX_TRANSACTIONS_PER_BATCH = 100   # Increased transaction batch size with more memory
 SILVER_PNL_PROCESSING_TIMEOUT_SECONDS = 300  # 5 minutes timeout per wallet
 SILVER_PNL_CHECKPOINT_INTERVAL = 50     # Save progress every 50 wallets
