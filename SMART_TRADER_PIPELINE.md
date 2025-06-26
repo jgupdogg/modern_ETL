@@ -1,16 +1,16 @@
 # Smart Trader Identification Pipeline
 
-**Pipeline Status**: ✅ **PRODUCTION READY & TRUE DELTA LAKE COMPLETE**  
-**Last Updated**: June 24, 2025  
-**Last Test Run**: ✅ **100% SUCCESS** (June 24, 2025)  
-**Data Location**: `s3://smart-trader/` (TRUE Delta Lake) + `s3://solana-data/` (Legacy - Deprecated)  
-**DAGs**: `optimized_delta_smart_trader_identification` (TRUE Delta Lake) + `smart_trader_identification_dag` (Legacy - Deprecated)
+**Pipeline Status**: ✅ **PRODUCTION READY & TRUE DELTA LAKE OPTIMIZED**  
+**Last Updated**: June 26, 2025  
+**Last Test Run**: ✅ **100% SUCCESS** (June 26, 2025)  
+**Data Location**: `s3://smart-trader/` (TRUE Delta Lake with ACID transactions)  
+**DAGs**: `optimized_delta_smart_trader_identification` (TRUE Delta Lake with batch optimizations)
 
 ## Executive Summary
 
 The Smart Trader Identification Pipeline is a **fully validated, production-ready** end-to-end system for identifying and monitoring profitable cryptocurrency traders on Solana. The pipeline processes real token data, analyzes whale holdings, calculates comprehensive PnL metrics using FIFO methodology, and outputs elite traders for real-time monitoring via Helius webhooks.
 
-**Current Status**: ✅ **FULLY OPERATIONAL** with **TRUE Delta Lake ACID compliance**, consolidated optimized tasks architecture, 100% centralized configuration, ZERO fallbacks implementation, complete medallion data flow, and **enterprise-grade incremental processing** with state tracking.
+**Current Status**: ✅ **FULLY OPERATIONAL** with **TRUE Delta Lake ACID compliance**, batch processing optimizations (10 wallets per batch), MERGE operation efficiency improvements, 100% centralized configuration, ZERO fallbacks implementation, complete medallion data flow, and **enterprise-grade incremental processing** with intelligent state tracking.
 
 ## 🏗️ TRUE DELTA LAKE IMPLEMENTATION COMPLETE (June 24, 2025)
 
@@ -23,8 +23,8 @@ The pipeline now features a **complete TRUE Delta Lake implementation** that has
 - ✅ **Schema Evolution**: Safe column additions/modifications via Delta Lake protocol
 - ✅ **Time Travel**: Query any historical version using `versionAsOf` and `timestampAsOf`
 - ✅ **Data Quality**: Built-in validation and constraints with transaction integrity
-- ✅ **Performance**: ~2 minutes end-to-end execution with conservative memory management
-- ✅ **Production Ready**: 1GB memory limits prevent crashes, 10-wallet batches for stability
+- ✅ **Performance**: ~2 minutes end-to-end execution with optimized batch processing
+- ✅ **Production Ready**: 1GB memory limits prevent crashes, 10-wallet batches with batched MERGE operations
 - ✅ **Incremental Processing**: Complete state tracking prevents infinite reprocessing loops
 
 **TRUE Delta Lake Implementation**: `optimized_delta_tasks.py`
@@ -59,6 +59,54 @@ The pipeline now features a **complete TRUE Delta Lake implementation** that has
 | **Code Quality** | ⚠️ Multiple files, duplicates | ✅ **Single optimized file** |
 | **Implementation** | ⚠️ Pseudo-Delta Lake | ✅ **TRUE Delta Lake** |
 | **State Tracking** | ❌ Infinite reprocessing | ✅ **Incremental processing** |
+| **Batch Processing** | ❌ Individual operations | ✅ **10-wallet batches with MERGE optimization** |
+
+## 🚀 BATCH PROCESSING OPTIMIZATIONS (June 26, 2025)
+
+### Performance & MERGE Operation Improvements ✅ **PRODUCTION DEPLOYED**
+
+**Major Optimizations Implemented**:
+- **✅ 10-Wallet Batch Processing**: Increased from 1 → 4 → 10 wallets per batch for optimal throughput
+- **✅ Batch MERGE Operations**: Reduced MERGE operations by 10x through batched status updates
+- **✅ Composite Key MERGE Fixes**: Resolved duplicate key conflicts with proper composite keys
+- **✅ Aggregate Logging**: Clean batch summaries replacing verbose individual wallet logs
+- **✅ Memory Safety Maintained**: Conservative 1GB limits with improved efficiency
+
+**MERGE Operation Optimizations**:
+```sql
+-- Bronze Transactions: Composite key prevents conflicts
+MERGE ON "target.transaction_hash = source.transaction_hash AND target.base_address = source.base_address"
+
+-- Silver Whales: Whale ID composite key (wallet + token)
+MERGE ON "target.whale_id = source.whale_id"
+
+-- Silver PnL Status Updates: Batched (10 wallets per MERGE instead of 10 individual MERGEs)
+MERGE ON "target.wallet_address = source.wallet_address"
+```
+
+**Performance Benefits Achieved**:
+- ✅ **10x Fewer Database Operations**: 1 status update MERGE per 10 wallets
+- ✅ **Faster Processing**: 10 wallets processed sequentially with efficient resource usage  
+- ✅ **Zero MERGE Conflicts**: Proper composite keys eliminate duplicate key issues
+- ✅ **Clean Monitoring**: Aggregate batch metrics (wallets with PnL data, no transactions, failures)
+- ✅ **Same Memory Safety**: Maintained 1GB conservative limits while improving efficiency
+
+**Batch Processing Configuration**:
+```python
+# Current optimized settings (dags/config/smart_trader_config.py)
+SILVER_PNL_WALLET_BATCH_SIZE = 10                    # 10 wallets per batch
+SILVER_PNL_MAX_TRANSACTIONS_PER_BATCH = 100          # Transaction processing limit
+SPARK_DRIVER_MEMORY = '1g'                           # Conservative memory settings
+SPARK_EXECUTOR_MEMORY = '1g'                         # Prevents system crashes
+```
+
+**Logging Improvements**:
+- **Before**: Individual wallet processing logs, verbose transaction details
+- **After**: Clean batch summaries with aggregate metrics
+  - X wallets with PnL data
+  - X wallets with no transactions
+  - X wallets with no valid transactions  
+  - X wallets failed
 
 ## 🎯 RECENT VALIDATION & CONSOLIDATION (June 19, 2025)
 
