@@ -38,9 +38,11 @@ def fetch_bronze_tokens(**context):
         result = create_bronze_tokens_delta(**context)
         
         if result and isinstance(result, dict):
-            tokens_count = result.get('tokens_processed', 0)
-            logger.info(f"✅ Bronze tokens: {tokens_count} processed with Delta Lake")
-            return {"status": "success", "tokens_count": tokens_count}
+            tokens_count = result.get('records', 0)
+            new_records = result.get('new_records', 0)
+            updated_records = result.get('updated_records', 0)
+            logger.info(f"✅ Bronze tokens: {tokens_count} processed with Delta Lake ({new_records} new, {updated_records} updated)")
+            return {"status": "success", "tokens_count": tokens_count, "new_records": new_records, "updated_records": updated_records}
         else:
             logger.warning("⚠️ No token data returned")
             return {"status": "no_data", "tokens_count": 0}
@@ -182,18 +184,53 @@ def create_silver_tracked_tokens(**context):
         # Execute SQL transformation
         silver_df = delta_manager.spark.sql(silver_tokens_sql)
         
-        # Write to silver tracked tokens Delta table
+        # Write to silver tracked tokens Delta table using MERGE
         silver_tokens_path = get_table_path("silver_tokens")
         table_config = get_table_config("silver_tokens")
-        version = delta_manager.create_table(
-            silver_df, 
-            silver_tokens_path,
-            partition_cols=table_config["partition_cols"],
-            merge_schema=True
-        )
         
+        # Count records and track new vs updated
         record_count = silver_df.count()
-        logger.info(f"✅ Silver tracked tokens: {record_count} records created in Delta v{version}")
+        new_records = 0
+        updated_records = 0
+        
+        if delta_manager.table_exists(silver_tokens_path):
+            # Count existing tokens before merge to track new vs updated
+            existing_tokens_df = delta_manager.spark.read.format("delta").load(silver_tokens_path)
+            existing_token_addresses = [row.token_address for row in existing_tokens_df.select("token_address").collect()]
+            silver_token_addresses = [row.token_address for row in silver_df.select("token_address").collect()]
+            
+            updated_records = len([addr for addr in silver_token_addresses if addr in existing_token_addresses])
+            new_records = record_count - updated_records
+            
+            # Use MERGE operation (UPSERT) based on token_address
+            # CRITICAL: Reset whale_fetch_status for both new and updated tokens
+            merge_condition = "target.token_address = source.token_address"
+            source_columns = [c for c in silver_df.columns if not c.startswith("_delta")]
+            update_set = {c: f"source.{c}" for c in source_columns if c != "token_address"}
+            # Force whale_fetch_status = pending on updates to ensure whales are refetched
+            update_set["whale_fetch_status"] = "'pending'"
+            update_set["whale_fetched_at"] = "null"
+            update_set["is_newly_tracked"] = "true"
+            
+            insert_values = {c: f"source.{c}" for c in silver_df.columns}
+            version = delta_manager.merge_data(
+                silver_df, silver_tokens_path, 
+                merge_condition, update_set, insert_values
+            )
+            operation = f"MERGE_UPSERT ({new_records} new, {updated_records} updated)"
+        else:
+            # Create table for first time
+            new_records = record_count
+            updated_records = 0
+            version = delta_manager.create_table(
+                silver_df, 
+                silver_tokens_path,
+                partition_cols=table_config["partition_cols"]
+            )
+            operation = "CREATE"
+        
+        logger.info(f"✅ Silver tracked tokens: {record_count} records → Delta v{version} ({operation})")
+        logger.info(f"State management: All {record_count} tokens ready for whale fetching (whale_fetch_status=pending)")
         
         # Mark processed bronze tokens as completed
         if record_count > 0:
@@ -204,23 +241,38 @@ def create_silver_tracked_tokens(**context):
             if delta_manager.table_exists(bronze_tokens_path):
                 bronze_df = delta_manager.spark.read.format("delta").load(bronze_tokens_path)
                 
-                updated_bronze_df = bronze_df.withColumn(
-                    "processed",
-                    when(col("token_address").isin(processed_token_addresses), lit(True))
-                    .otherwise(col("processed"))
-                ).withColumn(
-                    "_delta_timestamp", current_timestamp()
-                ).withColumn(
-                    "_delta_operation", lit("BRONZE_TOKEN_UPDATE")
-                )
+                # Create update DataFrame for MERGE operation
+                from pyspark.sql.types import StructType, StructField, StringType, BooleanType, TimestampType
                 
-                # Overwrite bronze table with updated processed status
-                updated_bronze_df.write.format("delta").mode("overwrite").option("overwriteSchema", "true").save(bronze_tokens_path)
-                logger.info(f"✅ Marked {len(processed_token_addresses)} bronze tokens as processed")
+                # Create minimal update DataFrame with just the fields we need to update
+                update_data = [
+                    (token_address, True, datetime.now(), "BRONZE_TOKEN_UPDATE") 
+                    for token_address in processed_token_addresses
+                ]
+                
+                update_schema = StructType([
+                    StructField("token_address", StringType(), False),
+                    StructField("processed", BooleanType(), False),
+                    StructField("_delta_timestamp", TimestampType(), False),
+                    StructField("_delta_operation", StringType(), False)
+                ])
+                
+                update_df = delta_manager.spark.createDataFrame(update_data, update_schema)
+                
+                # Use MERGE to update bronze tokens
+                merge_condition = "target.token_address = source.token_address"
+                update_set = {"processed": "source.processed", "_delta_timestamp": "source._delta_timestamp"}
+                delta_manager.merge_data(
+                    update_df, bronze_tokens_path,
+                    merge_condition, update_set
+                )
+                logger.info(f"✅ Marked {len(processed_token_addresses)} bronze tokens as processed via MERGE")
         
         return {
             "status": "success", 
             "records": record_count,
+            "new_records": new_records,
+            "updated_records": updated_records,
             "delta_version": version,
             "table_path": silver_tokens_path
         }
@@ -385,22 +437,59 @@ def create_silver_tracked_whales(**context):
         # Execute SQL transformation
         silver_df = delta_manager.spark.sql(silver_whales_sql)
         
-        # Write to silver tracked whales Delta table
+        # Write to silver tracked whales Delta table using MERGE
         silver_whales_path = get_table_path("silver_whales")
         table_config = get_table_config("silver_whales")
-        version = delta_manager.create_table(
-            silver_df,
-            silver_whales_path,
-            partition_cols=table_config["partition_cols"],
-            merge_schema=True
-        )
         
+        # Count records and track new vs updated
         record_count = silver_df.count()
-        logger.info(f"✅ Silver tracked whales: {record_count} records created in Delta v{version}")
+        new_records = 0
+        updated_records = 0
+        
+        if delta_manager.table_exists(silver_whales_path):
+            # Count existing whale_ids before merge to track new vs updated
+            existing_whales_df = delta_manager.spark.read.format("delta").load(silver_whales_path)
+            existing_whale_ids = [row.whale_id for row in existing_whales_df.select("whale_id").collect()]
+            current_whale_ids = [row.whale_id for row in silver_df.select("whale_id").collect()]
+            
+            updated_records = len([whale_id for whale_id in current_whale_ids if whale_id in existing_whale_ids])
+            new_records = record_count - updated_records
+            
+            # Use MERGE operation (UPSERT) based on whale_id
+            # CRITICAL: Reset transaction/PnL status for both new and updated whales
+            merge_condition = "target.whale_id = source.whale_id"
+            source_columns = [c for c in silver_df.columns if not c.startswith("_delta")]
+            update_set = {c: f"source.{c}" for c in source_columns if c != "whale_id"}
+            # Force reset processing status for updated whales to ensure transactions are refetched
+            update_set["processing_status"] = "'ready'"
+            update_set["is_newly_tracked"] = "true"
+            
+            insert_values = {c: f"source.{c}" for c in silver_df.columns}
+            version = delta_manager.merge_data(
+                silver_df, silver_whales_path, 
+                merge_condition, update_set, insert_values
+            )
+            operation = f"MERGE_UPSERT ({new_records} new, {updated_records} updated)"
+        else:
+            # Create table for first time
+            new_records = record_count
+            updated_records = 0
+            version = delta_manager.create_table(
+                silver_df,
+                silver_whales_path,
+                partition_cols=table_config["partition_cols"],
+                merge_schema=True
+            )
+            operation = "CREATE"
+        
+        logger.info(f"✅ Silver tracked whales: {record_count} records → Delta v{version} ({operation})")
+        logger.info(f"State management: All {record_count} whales ready for transaction fetching (processing_status=ready)")
         
         return {
             "status": "success",
-            "records": record_count, 
+            "records": record_count,
+            "new_records": new_records,
+            "updated_records": updated_records,
             "delta_version": version,
             "table_path": silver_whales_path
         }
@@ -422,10 +511,12 @@ def fetch_bronze_whales(**context):
         result = create_bronze_whales_delta(**context)
         
         if result and isinstance(result, dict):
-            whales_count = result.get('total_whales', 0)
+            whales_count = result.get('records', 0)
+            new_whales = result.get('new_records', 0) 
+            updated_whales = result.get('updated_records', 0)
             tokens_processed = result.get('tokens_processed', 0)
-            logger.info(f"✅ Bronze whales: {tokens_processed} tokens, {whales_count} whales with Delta Lake")
-            return {"status": "success", "whales_count": whales_count, "tokens_processed": tokens_processed}
+            logger.info(f"✅ Bronze whales: {tokens_processed} tokens processed, {whales_count} whale records ({new_whales} new, {updated_whales} updated)")
+            return {"status": "success", "whales_count": whales_count, "new_whales": new_whales, "updated_whales": updated_whales, "tokens_processed": tokens_processed}
         else:
             logger.warning("⚠️ No whale data returned")
             return {"status": "no_data", "whales_count": 0}
@@ -448,9 +539,11 @@ def fetch_bronze_transactions(**context):
         
         if result and isinstance(result, dict):
             wallets_processed = result.get('wallets_processed', 0)
-            transactions_saved = result.get('total_transactions', 0)
-            logger.info(f"✅ Bronze transactions: {wallets_processed} wallets, {transactions_saved} transactions with Delta Lake")
-            return {"status": "success", "wallets_processed": wallets_processed, "transactions_saved": transactions_saved}
+            transactions_saved = result.get('records', 0)
+            new_transactions = result.get('new_records', 0)
+            updated_transactions = result.get('updated_records', 0)
+            logger.info(f"✅ Bronze transactions: {wallets_processed} wallets processed, {transactions_saved} transaction records ({new_transactions} new, {updated_transactions} updated)")
+            return {"status": "success", "wallets_processed": wallets_processed, "transactions_saved": transactions_saved, "new_transactions": new_transactions, "updated_transactions": updated_transactions}
         else:
             logger.warning("⚠️ No transaction data returned")
             return {"status": "no_data", "transactions_saved": 0}
@@ -476,13 +569,28 @@ def calculate_silver_pnl(**context):
         result = create_silver_wallet_pnl_delta(**context)
         
         if result and isinstance(result, dict):
+            total_wallets_found = result.get('total_wallets_found', 0)
             wallets_processed = result.get('wallets_processed', 0)
-            pnl_records = result.get('total_records', 0)
-            logger.info(f"✅ Silver PnL: {wallets_processed} wallets, {pnl_records} records with Delta Lake FIFO")
+            wallets_failed = result.get('wallets_failed', 0)
+            new_wallets = result.get('new_wallets_count', 0)
+            updated_wallets = result.get('updated_wallets_count', 0)
+            pnl_records = result.get('total_pnl_records', 0)
+            timeout_reached = result.get('timeout_reached', False)
+            
+            if timeout_reached:
+                logger.info(f"⏱️ Silver PnL (partial): {wallets_processed}/{total_wallets_found} wallets processed ({new_wallets} new, {updated_wallets} updated), {pnl_records} PnL records, {wallets_failed} failed")
+            else:
+                logger.info(f"✅ Silver PnL: {wallets_processed}/{total_wallets_found} wallets processed ({new_wallets} new, {updated_wallets} updated), {pnl_records} PnL records, {wallets_failed} failed")
+            
             return {
                 "status": "success",
+                "total_wallets_found": total_wallets_found,
                 "wallets_processed": wallets_processed,
-                "pnl_records": pnl_records
+                "wallets_failed": wallets_failed,
+                "new_wallets": new_wallets,
+                "updated_wallets": updated_wallets,
+                "pnl_records": pnl_records,
+                "timeout_reached": timeout_reached
             }
         else:
             logger.warning("⚠️ No PnL data generated")
@@ -506,6 +614,7 @@ def create_gold_smart_traders(**context):
     try:
         from utils.true_delta_manager import TrueDeltaLakeManager, get_table_path
         from config.true_delta_config import get_table_config
+        from pyspark.sql.types import StructType, StructField, StringType, BooleanType, TimestampType
         
         delta_manager = TrueDeltaLakeManager()
         
@@ -577,62 +686,94 @@ def create_gold_smart_traders(**context):
         # Execute SQL transformation
         gold_df = delta_manager.spark.sql(gold_traders_sql)
         
-        # Write to gold smart traders Delta table
+        # Write to gold smart traders Delta table using MERGE
         gold_traders_path = get_table_path("gold_traders")
         table_config = get_table_config("gold_traders")
         
-        # Append to gold table (incremental processing)
+        # Count records and track new vs updated
+        record_count = gold_df.count()
+        new_records = 0
+        updated_records = 0
+        
         if delta_manager.table_exists(gold_traders_path):
-            # Table exists, append new records
-            gold_df.write.format("delta").mode("append") \
-                   .option("mergeSchema", "true") \
-                   .save(gold_traders_path)
-            operation = "APPEND"
+            # Count existing traders before merge to track new vs updated
+            existing_traders_df = delta_manager.spark.read.format("delta").load(gold_traders_path)
+            existing_wallet_addresses = [row.wallet_address for row in existing_traders_df.select("wallet_address").collect()]
+            current_wallet_addresses = [row.wallet_address for row in gold_df.select("wallet_address").collect()]
+            
+            updated_records = len([addr for addr in current_wallet_addresses if addr in existing_wallet_addresses])
+            new_records = record_count - updated_records
+            
+            # Use MERGE operation (UPSERT) based on wallet_address
+            merge_condition = "target.wallet_address = source.wallet_address"
+            source_columns = [c for c in gold_df.columns if not c.startswith("_delta")]
+            update_set = {c: f"source.{c}" for c in source_columns if c != "wallet_address"}
+            insert_values = {c: f"source.{c}" for c in gold_df.columns}
+            
+            version = delta_manager.merge_data(
+                gold_df, gold_traders_path, 
+                merge_condition, update_set, insert_values
+            )
+            operation = f"MERGE_UPSERT ({new_records} new, {updated_records} updated)"
         else:
-            # Table doesn't exist, create it
-            gold_df.write.format("delta").mode("overwrite") \
-                   .partitionBy(*table_config["partition_cols"] if table_config["partition_cols"] else []) \
-                   .save(gold_traders_path)
+            # Create table for first time
+            new_records = record_count
+            updated_records = 0
+            version = delta_manager.create_table(
+                gold_df,
+                gold_traders_path,
+                partition_cols=table_config["partition_cols"]
+            )
             operation = "CREATE"
         
         # Get stats
-        record_count = gold_df.count()
         tier_counts = gold_df.groupBy("performance_tier").count().collect()
         tier_stats = {row['performance_tier']: row['count'] for row in tier_counts}
         
-        # Mark processed wallets in silver_pnl as moved_to_gold
+        # Mark processed wallets in silver_pnl as moved_to_gold using MERGE
         if record_count > 0:
             processed_wallet_addresses = [row.wallet_address for row in gold_df.select("wallet_address").collect()]
             
-            # Update silver_pnl to mark wallets as processed for gold
-            updated_silver_df = silver_df.withColumn(
-                "moved_to_gold",
-                when(col("wallet_address").isin(processed_wallet_addresses), lit(True))
-                .otherwise(col("moved_to_gold"))
-            ).withColumn(
-                "gold_processed_at",
-                when(col("wallet_address").isin(processed_wallet_addresses), current_timestamp().cast("string"))
-                .otherwise(col("gold_processed_at"))
-            ).withColumn(
-                "gold_processing_status",
-                when(col("wallet_address").isin(processed_wallet_addresses), lit("completed"))
-                .otherwise(col("gold_processing_status"))
-            ).withColumn(
-                "_delta_timestamp", current_timestamp()
-            )
+            # Create update DataFrame for MERGE operation
+            update_data = [
+                (wallet_address, True, datetime.now(), "completed", "SILVER_PNL_UPDATE") 
+                for wallet_address in processed_wallet_addresses
+            ]
             
-            # Write updated silver_pnl table back
-            updated_silver_df.write.format("delta").mode("overwrite").save(silver_pnl_path)
-            logger.info(f"Marked {len(processed_wallet_addresses)} wallets as moved_to_gold")
+            update_schema = StructType([
+                StructField("wallet_address", StringType(), False),
+                StructField("moved_to_gold", BooleanType(), False),
+                StructField("gold_processed_at", TimestampType(), False),
+                StructField("gold_processing_status", StringType(), False),
+                StructField("_delta_operation", StringType(), False)
+            ])
+            
+            update_df = delta_manager.spark.createDataFrame(update_data, update_schema)
+            
+            # Use MERGE to update silver PnL table
+            merge_condition = "target.wallet_address = source.wallet_address AND target.token_address = 'ALL_TOKENS'"
+            update_set = {
+                "moved_to_gold": "source.moved_to_gold", 
+                "gold_processed_at": "source.gold_processed_at",
+                "gold_processing_status": "source.gold_processing_status",
+                "_delta_timestamp": "current_timestamp()"
+            }
+            delta_manager.merge_data(
+                update_df, silver_pnl_path,
+                merge_condition, update_set
+            )
+            logger.info(f"✅ Marked {len(processed_wallet_addresses)} wallets as moved_to_gold via MERGE")
         
-        logger.info(f"✅ Gold smart traders: {record_count} qualified traders {operation.lower()}ed")
-        logger.info(f"   Performance tiers: {tier_stats}")
+        logger.info(f"✅ Gold smart traders: {record_count} records → Delta v{version} ({operation})")
+        logger.info(f"Performance tiers: {tier_stats}")
         
         return {
             "status": "success",
-            "smart_traders_count": record_count,
+            "records": record_count,
+            "new_records": new_records,
+            "updated_records": updated_records,
             "performance_tiers": tier_stats,
-            "operation": operation,
+            "delta_version": version,
             "table_path": gold_traders_path
         }
         

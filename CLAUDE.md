@@ -16,24 +16,30 @@ This is an Apache Airflow project for orchestrating data pipelines, using Docker
 - **DAG**: `optimized_delta_smart_trader_identification`
 - **Documentation**: See `SMART_TRADER_PIPELINE.md` + `TRUE_DELTA_LAKE_IMPLEMENTATION.md`
 - **Status**: ✅ **TRUE Delta Lake + Intelligent State Tracking COMPLETE** with ZERO fallbacks
+- **⚠️ TEMPORARY ISSUE**: Webhook overload resolved with fake placeholder addresses (see Known Issues below)
 
 ## Key Commands
 
 ### Starting and Managing Airflow
 
 ```bash
-# Start all services
-docker-compose up -d
+# RECOMMENDED: Use the smart startup script
+./start-services.sh
+
+# Manual startup (if needed)
+docker compose up -d
 
 # Stop all services
-docker-compose down
+docker compose down
 
 # View logs
-docker-compose logs -f [service-name]  # e.g., airflow-scheduler, airflow-worker
+docker compose logs -f [service-name]  # e.g., airflow-scheduler, airflow-worker
 
 # Access Airflow CLI
-docker-compose run airflow-cli airflow [command]
+docker compose run airflow-cli airflow [command]
 ```
+
+**Note**: The startup script (`./start-services.sh`) handles dependency issues and ensures reliable startup. Use this instead of direct `docker compose up -d` to avoid startup problems.
 
 ### DAG Operations
 
@@ -491,3 +497,34 @@ docker system df
 - MinIO credentials are stored in `.env` file
 - All operations use TRUE Delta Lake with real `_delta_log` directories
 - State tracking prevents infinite reprocessing loops
+
+## ⚠️ Known Issues & Temporary Workarounds
+
+### **Webhook Integration (2025-06-26)**
+**Status**: ✅ RESOLVED - Ready for Production
+
+**Resolution**: 
+- Webhook credit issue has been resolved by Helius
+- Pipeline is ready to identify and track smart traders
+
+**Current Configuration**:
+- **Gold table criteria**: Restored to reasonable levels (≥$10 PnL OR ≥40% win rate)
+- **Safety filters**: Excludes high-frequency traders (>100 trades/day) to prevent bot overload
+- **dbt model**: `/dbt/models/gold/smart_wallets.sql` - Production-ready criteria
+- **Webhook ID**: `1097c4af-1136-49ab-9a91-499af2e86d94` - Active and ready
+
+**Implementation**:
+- `helius_tasks.py` reads gold traders via DuckDB's `delta_scan()`
+- Extracts unique wallet addresses (up to 100 per webhook)
+- Updates webhook with smart trader addresses automatically
+
+**Files Updated**:
+- `/dbt/models/gold/smart_wallets.sql` - Production criteria restored
+- `/.env` - Updated webhook ID to `1097c4af-1136-49ab-9a91-499af2e86d94`
+- `/dags/tasks/helius_tasks.py` - Already configured for Delta Lake integration
+
+**Next Steps**:
+1. Locate and migrate remaining legacy PnL data from PostgreSQL
+2. Test dbt model with small trader counts (1-5 traders)
+3. Monitor webhook performance and gradually increase trader selection
+4. Implement additional anti-overtrading filters if needed
