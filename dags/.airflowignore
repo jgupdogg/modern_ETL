@@ -1,0 +1,38 @@
+# Airflow ignore file - exclude archived DAGs from being parsed
+# This prevents old/archived DAG files from appearing in the Airflow UI
+
+# Archive directories
+archive/
+archive/*
+archive/**/*
+
+# Backup files
+*.bak
+*.backup
+*_backup.py
+
+# Test files that shouldn't be active
+*test*.py
+test_*
+
+# Temporary files
+*.tmp
+*.temp
+*~
+*.swp
+*.swo
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# IDE files
+.vscode/
+.idea/
+*.sublime-*
+
+# OS files
+.DS_Store
+Thumbs.db
