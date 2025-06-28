@@ -7,6 +7,7 @@ x-airflow-common:
   build: 
     context: .
     dockerfile: Dockerfile.airflow
+  restart: unless-stopped
   environment:
     &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: CeleryExecutor
@@ -34,6 +35,7 @@ x-airflow-common:
     - ${AIRFLOW_PROJ_DIR:-.}/config:/opt/airflow/config
     - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
     - ${AIRFLOW_PROJ_DIR:-.}/dbt:/opt/airflow/dbt
+    - ${AIRFLOW_PROJ_DIR:-.}/data/webhooks:/opt/airflow/data
     - duckdb-data:/data
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on:
@@ -57,7 +59,8 @@ services:
       interval: 10s
       retries: 5
       start_period: 5s
-    restart: always
+    restart: unless-stopped
+
 
   redis:
     # Redis is limited to 7.2-bookworm due to licencing change
@@ -71,7 +74,8 @@ services:
       timeout: 30s
       retries: 50
       start_period: 30s
-    restart: always
+    restart: unless-stopped
+
 
   airflow-apiserver:
     <<: *airflow-common
@@ -84,7 +88,7 @@ services:
       timeout: 10s
       retries: 5
       start_period: 30s
-    restart: always
+
     depends_on:
       <<: *airflow-common-depends-on
       airflow-init:
@@ -99,7 +103,7 @@ services:
       timeout: 10s
       retries: 5
       start_period: 30s
-    restart: always
+
     depends_on:
       <<: *airflow-common-depends-on
       airflow-init:
@@ -114,7 +118,7 @@ services:
       timeout: 10s
       retries: 5
       start_period: 30s
-    restart: always
+
     depends_on:
       <<: *airflow-common-depends-on
       airflow-init:
@@ -137,7 +141,7 @@ services:
       # Required to handle warm shutdown of the celery workers properly
       # See https://airflow.apache.org/docs/docker-stack/entrypoint.html#signal-propagation
       DUMB_INIT_SETSID: "0"
-    restart: always
+
     depends_on:
       <<: *airflow-common-depends-on
       airflow-apiserver:
@@ -154,7 +158,7 @@ services:
       timeout: 10s
       retries: 5
       start_period: 30s
-    restart: always
+
     depends_on:
       <<: *airflow-common-depends-on
       airflow-init:
@@ -283,7 +287,7 @@ services:
       timeout: 10s
       retries: 5
       start_period: 30s
-    restart: always
+
     depends_on:
       <<: *airflow-common-depends-on
       airflow-init:
@@ -315,7 +319,8 @@ services:
       timeout: 10s
       retries: 5
       start_period: 30s
-    restart: always
+    restart: unless-stopped
+
     depends_on:
       redpanda:
         condition: service_healthy
@@ -341,7 +346,7 @@ services:
       - --smp
       - '1'
       - --memory
-      - '1G'
+      - '512M'
       - --default-log-level=info
     ports:
       - "19092:19092"
@@ -356,7 +361,8 @@ services:
       timeout: 3s
       retries: 5
       start_period: 30s
-    restart: always
+    restart: unless-stopped
+
 
   # Redpanda Console for monitoring
   redpanda-console:
@@ -381,7 +387,8 @@ services:
     depends_on:
       redpanda:
         condition: service_healthy
-    restart: always
+    restart: unless-stopped
+
 
   # MinIO Object Storage
   minio:
@@ -402,7 +409,8 @@ services:
       timeout: 20s
       retries: 3
       start_period: 30s
-    restart: always
+    restart: unless-stopped
+
 
   # DuckDB Analytics Database
   duckdb:
@@ -431,7 +439,8 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
-    restart: always
+    restart: unless-stopped
+
     depends_on:
       minio:
         condition: service_healthy
@@ -451,7 +460,8 @@ services:
         pip install dbt-core dbt-duckdb &&
         tail -f /dev/null
       "
-    restart: always
+    restart: unless-stopped
+
     depends_on:
       duckdb:
         condition: service_healthy

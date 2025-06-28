@@ -1,12 +1,11 @@
 import os
 import json
 import logging
-from datetime import datetime, timedelta
-from pathlib import Path
-from typing import Any, Dict, Optional
-from uuid import uuid4
 import asyncio
-import shutil
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -21,136 +20,27 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Webhook Listener", version="1.0.0")
+app = FastAPI(title="Webhook Listener", version="2.0.0")
 
 # Configuration
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-# Cleanup configuration
-WEBHOOK_RETENTION_DAYS = int(os.getenv("WEBHOOK_RETENTION_DAYS", "7"))
-CLEANUP_ENABLED = os.getenv("CLEANUP_ENABLED", "true").lower() == "true"
-CLEANUP_ON_STARTUP = os.getenv("CLEANUP_ON_STARTUP", "true").lower() == "true"
+DATA_DIR.mkdir(parents=True, exist_ok=True)  # Only for URL file storage
 
 # Redpanda configuration
 REDPANDA_BROKERS = os.getenv("REDPANDA_BROKERS", "localhost:9092")
 WEBHOOK_TOPIC = os.getenv("WEBHOOK_TOPIC", "webhooks")
 
-# Global Kafka producer
+# Global Kafka producer  
 producer: Optional[AIOKafkaProducer] = None
+
+# Global PySpark session for Delta Lake writes
+delta_manager = None
+spark_session = None
 
 class WebhookResponse(BaseModel):
     status: str
     message_id: str
     timestamp: str
-
-class CleanupResponse(BaseModel):
-    status: str
-    files_deleted: int
-    directories_removed: int
-    space_freed_mb: float
-    retention_days: int
-
-def cleanup_old_webhook_files(dry_run: bool = False) -> Dict[str, Any]:
-    """
-    Clean up webhook files older than WEBHOOK_RETENTION_DAYS.
-    
-    Args:
-        dry_run: If True, only report what would be deleted without actually deleting
-        
-    Returns:
-        Dictionary with cleanup statistics
-    """
-    if not CLEANUP_ENABLED and not dry_run:
-        return {
-            "status": "disabled",
-            "files_deleted": 0,
-            "directories_removed": 0,
-            "space_freed_mb": 0.0,
-            "retention_days": WEBHOOK_RETENTION_DAYS,
-            "message": "Cleanup is disabled via CLEANUP_ENABLED=false"
-        }
-    
-    cutoff_date = datetime.utcnow() - timedelta(days=WEBHOOK_RETENTION_DAYS)
-    files_deleted = 0
-    directories_removed = 0
-    space_freed_bytes = 0
-    
-    logger.info(f"Starting webhook cleanup (dry_run={dry_run}), retention={WEBHOOK_RETENTION_DAYS} days")
-    logger.info(f"Deleting files older than: {cutoff_date.isoformat()}")
-    
-    try:
-        # Walk through date-based directory structure
-        for year_dir in DATA_DIR.iterdir():
-            if not year_dir.is_dir() or not year_dir.name.isdigit():
-                continue
-                
-            for month_dir in year_dir.iterdir():
-                if not month_dir.is_dir() or not month_dir.name.isdigit():
-                    continue
-                    
-                for day_dir in month_dir.iterdir():
-                    if not day_dir.is_dir() or not day_dir.name.isdigit():
-                        continue
-                    
-                    # Parse directory date
-                    try:
-                        dir_date = datetime.strptime(f"{year_dir.name}-{month_dir.name}-{day_dir.name}", "%Y-%m-%d")
-                    except ValueError:
-                        logger.warning(f"Skipping invalid date directory: {day_dir}")
-                        continue
-                    
-                    # Check if directory is older than retention period
-                    if dir_date < cutoff_date:
-                        # Count files and size before deletion
-                        files_in_dir = list(day_dir.glob("*.json"))
-                        dir_size = sum(f.stat().st_size for f in files_in_dir if f.is_file())
-                        
-                        logger.info(f"Cleaning directory: {day_dir} ({len(files_in_dir)} files, {dir_size/1024/1024:.2f}MB)")
-                        
-                        if not dry_run:
-                            shutil.rmtree(day_dir)
-                            directories_removed += 1
-                        
-                        files_deleted += len(files_in_dir)
-                        space_freed_bytes += dir_size
-                
-                # Remove empty month directories
-                if not dry_run and month_dir.exists() and not any(month_dir.iterdir()):
-                    month_dir.rmdir()
-                    logger.info(f"Removed empty month directory: {month_dir}")
-            
-            # Remove empty year directories  
-            if not dry_run and year_dir.exists() and not any(year_dir.iterdir()):
-                year_dir.rmdir()
-                logger.info(f"Removed empty year directory: {year_dir}")
-        
-        space_freed_mb = space_freed_bytes / 1024 / 1024
-        
-        result = {
-            "status": "success",
-            "files_deleted": files_deleted,
-            "directories_removed": directories_removed,
-            "space_freed_mb": round(space_freed_mb, 2),
-            "retention_days": WEBHOOK_RETENTION_DAYS,
-            "cutoff_date": cutoff_date.isoformat(),
-            "dry_run": dry_run
-        }
-        
-        logger.info(f"Cleanup completed: {files_deleted} files, {directories_removed} dirs, {space_freed_mb:.2f}MB")
-        return result
-        
-    except Exception as e:
-        logger.error(f"Error during cleanup: {e}")
-        return {
-            "status": "error",
-            "files_deleted": files_deleted,
-            "directories_removed": directories_removed,
-            "space_freed_mb": space_freed_bytes / 1024 / 1024,
-            "retention_days": WEBHOOK_RETENTION_DAYS,
-            "error": str(e),
-            "dry_run": dry_run
-        }
 
 async def get_kafka_producer():
     """Get or create Kafka producer instance."""
@@ -166,22 +56,14 @@ async def get_kafka_producer():
 
 @app.on_event("startup")
 async def startup_event():
-    """Initialize Kafka producer and run cleanup on startup."""
+    """Initialize Kafka producer."""
     try:
         await get_kafka_producer()
         logger.info("Kafka producer initialized successfully")
+        logger.info("FastAPI webhook listener running in STREAMING ONLY mode")
     except Exception as e:
         logger.error(f"Failed to initialize Kafka producer: {e}")
         # Continue running even if Kafka is not available
-    
-    # Run cleanup on startup if enabled
-    if CLEANUP_ON_STARTUP and CLEANUP_ENABLED:
-        try:
-            logger.info("Running startup cleanup...")
-            cleanup_result = cleanup_old_webhook_files(dry_run=False)
-            logger.info(f"Startup cleanup result: {cleanup_result}")
-        except Exception as e:
-            logger.error(f"Startup cleanup failed: {e}")
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -194,77 +76,119 @@ async def shutdown_event():
 @app.get("/")
 async def root():
     return {
-        "message": "Webhook Listener is running", 
-        "version": "1.0.0",
-        "redpanda_enabled": producer is not None
+        "message": "Webhook Listener is running (streaming only mode)", 
+        "version": "2.0.0",
+        "mode": "streaming_only",
+        "file_storage": "disabled",
+        "redpanda_enabled": producer is not None,
+        "redpanda_brokers": REDPANDA_BROKERS,
+        "redpanda_topic": WEBHOOK_TOPIC
     }
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
+    return {
+        "status": "healthy", 
+        "timestamp": datetime.utcnow().isoformat(),
+        "mode": "streaming_only",
+        "redpanda_connected": producer is not None
+    }
 
 @app.post("/webhooks")
 async def webhook_listener(request: Request) -> WebhookResponse:
     """
-    Receive webhook payloads and store them as JSON files.
+    Receive webhook payloads and stream them directly to Redpanda (no file storage).
     """
     try:
         # Get the raw payload
         payload = await request.json()
         
         # Generate unique ID and timestamp
-        message_id = str(uuid4())
+        webhook_id = str(uuid4())
         timestamp = datetime.utcnow()
         
-        # Create date-based directory structure
-        date_dir = DATA_DIR / timestamp.strftime("%Y/%m/%d")
-        date_dir.mkdir(parents=True, exist_ok=True)
+        # Extract transaction details from Helius webhook payload
+        transaction_signature = None
+        account_address = None
+        token_address = None
+        webhook_type = "UNKNOWN"
         
-        # Prepare the data to save
-        webhook_data = {
-            "message_id": message_id,
-            "timestamp": timestamp.isoformat(),
-            "payload": payload,
-            "headers": dict(request.headers),
-            "source_ip": request.client.host if request.client else None
-        }
-        
-        # Save to file
-        filename = f"{timestamp.strftime('%Y%m%d_%H%M%S')}_{message_id}.json"
-        file_path = date_dir / filename
-        
-        with open(file_path, 'w') as f:
-            json.dump(webhook_data, f, indent=2, default=str)
-        
-        logger.info(f"Webhook saved: {file_path}")
-        
-        # Publish to Redpanda if available
-        if producer:
-            try:
-                # Create Kafka message
-                kafka_message = {
-                    "message_id": message_id,
-                    "timestamp": timestamp.isoformat(),
-                    "payload": payload,
-                    "headers": dict(request.headers),
-                    "source_ip": request.client.host if request.client else None,
-                    "file_path": str(file_path)
-                }
+        try:
+            # Parse Helius webhook structure
+            if isinstance(payload, list) and len(payload) > 0:
+                first_event = payload[0]
+                transaction_signature = first_event.get("signature")
+                webhook_type = first_event.get("type", "UNKNOWN")
                 
-                # Send to Kafka
-                await producer.send_and_wait(
-                    WEBHOOK_TOPIC,
-                    value=kafka_message,
-                    key=message_id.encode('utf-8')
-                )
-                logger.info(f"Webhook published to Redpanda topic '{WEBHOOK_TOPIC}': {message_id}")
-            except Exception as e:
-                logger.error(f"Failed to publish to Redpanda: {e}")
-                # Continue even if Kafka publish fails
+                # Extract account/token from the transaction
+                if "accountData" in first_event:
+                    account_data = first_event.get("accountData", [])
+                    if account_data:
+                        account_address = account_data[0].get("account")
+                        
+                # For token transfers, extract token address
+                if "tokenTransfers" in first_event:
+                    token_transfers = first_event.get("tokenTransfers", [])
+                    if token_transfers:
+                        token_address = token_transfers[0].get("mint")
+        except Exception as e:
+            logger.warning(f"Could not parse Helius webhook structure: {e}")
+        
+        # Write directly to Delta Lake (FAST! No PySpark startup needed)
+        try:
+            import pandas as pd
+            from deltalake import write_deltalake
+            
+            # Create webhook record
+            webhook_record = {
+                "webhook_id": webhook_id,
+                "transaction_signature": transaction_signature,
+                "webhook_type": webhook_type,
+                "webhook_timestamp": timestamp,
+                "raw_payload": json.dumps(payload),  # Store as JSON string
+                "account_address": account_address,
+                "token_address": token_address,
+                "source_ip": request.client.host if request.client else None,
+                "user_agent": request.headers.get("user-agent"),
+                "created_at": timestamp,
+                "ingested_at": timestamp,
+                "processing_date": timestamp.strftime("%Y-%m-%d"),
+                "processed_to_silver": False
+            }
+            
+            # Convert to DataFrame
+            df = pd.DataFrame([webhook_record])
+            
+            # MinIO/S3 connection settings
+            storage_options = {
+                "AWS_ENDPOINT_URL": "http://minio:9000",
+                "AWS_ACCESS_KEY_ID": "minioadmin", 
+                "AWS_SECRET_ACCESS_KEY": "minioadmin123",
+                "AWS_ALLOW_HTTP": "true",
+                "AWS_S3_ALLOW_UNSAFE_RENAME": "true"
+            }
+            
+            # Write directly to Delta Lake (ACID transaction, ~1-2 seconds)
+            table_path = "s3://webhook-notifications/bronze/webhooks"
+            
+            write_deltalake(
+                table_path,
+                df,
+                mode="append",
+                partition_by=["processing_date"],
+                storage_options=storage_options,
+                engine="rust"  # Use Rust engine for speed
+            )
+            
+            logger.info(f"Webhook written to Delta Lake: {webhook_id} (signature: {transaction_signature})")
+            
+        except Exception as e:
+            logger.error(f"Failed to write webhook to Delta Lake: {e}")
+            raise HTTPException(status_code=500, detail="Failed to store webhook")
         
         return WebhookResponse(
             status="success",
-            message_id=message_id,
+            message_id=webhook_id,
             timestamp=timestamp.isoformat()
         )
         
@@ -278,14 +202,15 @@ async def webhook_listener(request: Request) -> WebhookResponse:
 @app.get("/webhooks/count")
 async def get_webhook_count():
     """
-    Get count of stored webhooks.
+    Get streaming status (no file storage).
     """
-    try:
-        count = sum(1 for _ in DATA_DIR.rglob("*.json"))
-        return {"count": count, "data_directory": str(DATA_DIR)}
-    except Exception as e:
-        logger.error(f"Error counting webhooks: {e}")
-        raise HTTPException(status_code=500, detail="Error counting webhooks")
+    return {
+        "mode": "streaming_only",
+        "file_storage": "disabled",
+        "redpanda_connected": producer is not None,
+        "topic": WEBHOOK_TOPIC,
+        "message": "Webhooks are streamed directly to Redpanda - no local storage"
+    }
 
 @app.get("/webhooks/status")
 async def get_webhook_status():
@@ -304,8 +229,7 @@ async def get_webhook_status():
                 "redpanda_enabled": producer is not None,
                 "redpanda_brokers": REDPANDA_BROKERS,
                 "redpanda_topic": WEBHOOK_TOPIC,
-                "cleanup_enabled": CLEANUP_ENABLED,
-                "retention_days": WEBHOOK_RETENTION_DAYS
+                "file_storage": "disabled"
             }
         else:
             return {
@@ -315,41 +239,22 @@ async def get_webhook_status():
                 "redpanda_enabled": producer is not None,
                 "redpanda_brokers": REDPANDA_BROKERS,
                 "redpanda_topic": WEBHOOK_TOPIC,
-                "cleanup_enabled": CLEANUP_ENABLED,
-                "retention_days": WEBHOOK_RETENTION_DAYS
+                "file_storage": "disabled"
             }
     except Exception as e:
         logger.error(f"Error getting webhook status: {e}")
         raise HTTPException(status_code=500, detail="Error getting webhook status")
 
-@app.post("/webhooks/cleanup")
-async def cleanup_webhooks(dry_run: bool = False) -> CleanupResponse:
+@app.get("/webhooks/cleanup")
+async def cleanup_status():
     """
-    Clean up old webhook files.
-    
-    Args:
-        dry_run: If True, only report what would be deleted without actually deleting
+    Cleanup not needed - streaming mode only.
     """
-    try:
-        result = cleanup_old_webhook_files(dry_run=dry_run)
-        
-        return CleanupResponse(
-            status=result["status"],
-            files_deleted=result["files_deleted"],
-            directories_removed=result["directories_removed"],
-            space_freed_mb=result["space_freed_mb"],
-            retention_days=result["retention_days"]
-        )
-    except Exception as e:
-        logger.error(f"Error during webhook cleanup: {e}")
-        raise HTTPException(status_code=500, detail=f"Cleanup failed: {str(e)}")
-
-@app.get("/webhooks/cleanup/dry-run")
-async def cleanup_webhooks_dry_run() -> CleanupResponse:
-    """
-    Preview what would be cleaned up without actually deleting files.
-    """
-    return await cleanup_webhooks(dry_run=True)
+    return {
+        "status": "not_applicable",
+        "message": "File storage disabled - no cleanup needed",
+        "mode": "streaming_only"
+    }
 
 if __name__ == "__main__":
     import uvicorn
